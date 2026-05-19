@@ -36,4 +36,12 @@ public struct XMLFunctionParser: ToolCallParser, Sendable {
 
         return QwenXMLPayloadScanner.parseCanonical(payload[...], tools: tools)
     }
+
+    public func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        guard
+            let payload = QwenXMLPayloadScanner.framedPayload(
+                in: content, startTag: startTag, endTag: endTag)
+        else { return [] }
+        return QwenXMLPayloadScanner.parseCalls(payload[...], tools: tools)
+    }
 }

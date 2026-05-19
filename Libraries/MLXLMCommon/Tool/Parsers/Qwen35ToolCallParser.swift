@@ -39,6 +39,18 @@ public struct Qwen35ToolCallParser: ToolCallParser, Sendable {
         return call
     }
 
+    public func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        guard let payload = payloadBody(in: content) else { return [] }
+        if payload.hasPrefix(QwenXMLPayloadScanner.functionOpen) {
+            let calls = QwenXMLPayloadScanner.parseCalls(payload[...], tools: tools)
+            guard calls.allSatisfy({ isDeclaredTool($0.function.name, tools: tools) }) else {
+                return []
+            }
+            return calls
+        }
+        return parse(content: content, tools: tools).map { [$0] } ?? []
+    }
+
     /// Returns the body used only to select a parser. The concrete parser remains
     /// responsible for validating the entire payload.
     private func payloadBody(in content: String) -> String? {

@@ -66,6 +66,37 @@ public struct GemmaFunctionParser: ToolCallParser, Sendable {
         return ToolCall(function: .init(name: funcName, arguments: arguments))
     }
 
+    public func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        guard
+            let payload = QwenXMLPayloadScanner.framedPayload(
+                in: content, startTag: startTag, endTag: endTag)
+        else { return [] }
+        var remaining = payload[...].trimmingWhitespace()
+        var calls: [ToolCall] = []
+        while !remaining.isEmpty {
+            guard remaining.hasPrefix("call:"),
+                let open = scanner.firstTopLevelIndex(of: "{", in: remaining),
+                let close = scanner.endOfGroup(in: remaining, openedAt: open),
+                let call = parse(content: String(remaining[...close]), tools: tools)
+            else { return [] }
+            calls.append(call)
+            remaining = remaining[remaining.index(after: close)...].trimmingWhitespace()
+        }
+        return calls
+    }
+
+    public func parseEOS(_ content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        guard let startTag else { return [] }
+        var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Gemma 4 can end the turn instead of closing its tool-call frame.
+        if startTag == "<|tool_call>", text.hasSuffix("<turn|>") {
+            text = String(text.dropLast("<turn|>".count))
+        }
+        return text.components(separatedBy: startTag)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .flatMap { parseCalls(content: $0, tools: tools) }
+    }
+
     /// Decodes one field value.
     ///
     /// A marker-wrapped value is a string the model escaped precisely because it
