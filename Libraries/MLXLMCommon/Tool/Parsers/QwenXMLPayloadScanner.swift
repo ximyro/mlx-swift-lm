@@ -153,6 +153,19 @@ enum QwenXMLPayloadScanner {
         return parsed.toolCall(tools: tools)
     }
 
+    static func parseCalls(
+        _ payload: Substring, tools: [[String: any Sendable]]?
+    ) -> [ToolCall] {
+        var remaining = payload.trimmingWhitespace()
+        var calls: [ToolCall] = []
+        while !remaining.isEmpty {
+            guard case .complete(let parsed) = scan(remaining) else { return [] }
+            calls.append(parsed.toolCall(tools: tools))
+            remaining = remaining[parsed.end...].trimmingWhitespace()
+        }
+        return calls
+    }
+
     /// Strip the optional framing tags from `content`, returning the payload a
     /// parser must then validate in full.
     ///
@@ -224,8 +237,13 @@ extension QwenXMLPayloadScanner.Payload {
             // reference implementation, which formats values on their own line).
             if value.hasPrefix("\n") { value = String(value.dropFirst()) }
             if value.hasSuffix("\n") { value = String(value.dropLast()) }
-            arguments[parameter.name] = convertParameterValue(
-                value, paramName: parameter.name, funcName: name, tools: tools)
+            if tools != nil {
+                arguments[parameter.name] = convertParameterValue(
+                    value, paramName: parameter.name, funcName: name, tools: tools)
+            } else {
+                let parsed = try? JSONDecoder().decode(JSONValue.self, from: Data(value.utf8))
+                arguments[parameter.name] = parsed?.sendableValue ?? value
+            }
         }
         return ToolCall(function: .init(name: name, arguments: arguments))
     }
@@ -295,17 +313,19 @@ enum ToolCallFrameScanner {
         }
 
         if text[payloadStart...].hasPrefix(QwenXMLPayloadScanner.functionOpen) {
-            guard
-                case .complete(let payload) = QwenXMLPayloadScanner.scan(text[payloadStart...])
-            else { return nil }
-            var afterPayload = payload.end
-            while afterPayload < text.endIndex, text[afterPayload].isWhitespace {
-                afterPayload = text.index(after: afterPayload)
-            }
-            guard afterPayload < text.endIndex,
-                text[afterPayload...].hasPrefix(endTag)
-            else { return nil }
-            return text.index(afterPayload, offsetBy: endTag.count)
+            var next = payloadStart
+            repeat {
+                guard case .complete(let payload) = QwenXMLPayloadScanner.scan(text[next...])
+                else { return nil }
+                next = payload.end
+                while next < text.endIndex, text[next].isWhitespace {
+                    next = text.index(after: next)
+                }
+                if text[next...].hasPrefix(endTag) {
+                    return text.index(next, offsetBy: endTag.count)
+                }
+            } while text[next...].hasPrefix(QwenXMLPayloadScanner.functionOpen)
+            return nil
         }
 
         // A split `<function=` prefix may still complete; anything else uses

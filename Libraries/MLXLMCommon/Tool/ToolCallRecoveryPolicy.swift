@@ -54,6 +54,8 @@ public struct ToolCallRecoveryEvent: Hashable, Sendable {
         case gemma4
         /// `<function=name><parameter=k>v</parameter></function>`.
         case qwenFunction = "qwen_function"
+        /// `[Calling tool: name({...})]` with a complete JSON argument object.
+        case qwenBracket = "qwen_bracket"
         /// `[TOOL_CALLS]name[ARGS]{...}`.
         case mistral
         /// Markerless `name[ARGS]{...}` rehearsal syntax (promoted only under

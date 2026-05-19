@@ -52,6 +52,7 @@ struct TextToolCallRecoveryScanner: Sendable {
         case toolCallFrame
         case gemma4
         case qwenFunction
+        case qwenBracket
         case mistral
     }
 
@@ -101,6 +102,8 @@ struct TextToolCallRecoveryScanner: Sendable {
 
         func shouldInspect(_ chunk: String) -> Bool {
             switch self {
+            case .explicit(.qwenBracket):
+                chunk.contains("]")
             case .explicit(.mistral), .declaredArgs, .nativeNamedJSON:
                 chunk.contains("}")
             case .explicit(.toolCallFrame), .explicit(.gemma4), .explicit(.qwenFunction):
@@ -186,6 +189,7 @@ struct TextToolCallRecoveryScanner: Sendable {
             for (marker, kind): (String, ExplicitKind) in [
                 ("<tool_call>", .toolCallFrame), ("<|tool_call>", .gemma4),
                 ("<function=", .qwenFunction), ("[TOOL_CALLS]", .mistral),
+                ("[Calling tool:", .qwenBracket),
             ] where !signals.contains(where: { $0.text == marker }) {
                 signals.append(Signal(text: marker, kind: .explicit(kind)))
             }
@@ -1074,6 +1078,11 @@ struct TextToolCallRecoveryScanner: Sendable {
 
     private func candidateExtent(for kind: ExplicitKind, in text: String) -> CandidateExtent {
         switch kind {
+        case .qwenBracket:
+            if let end = QwenBracketToolCallParser().frameEnd(in: text) {
+                return .complete(end: end)
+            }
+            return .needMore
         case .qwenFunction:
             switch QwenXMLPayloadScanner.scan(text[...]) {
             case .complete(let payload):
@@ -1214,6 +1223,7 @@ struct TextToolCallRecoveryScanner: Sendable {
         case .explicit(.toolCallFrame): dialect = .toolCallFrame
         case .explicit(.gemma4): dialect = .gemma4
         case .explicit(.qwenFunction): dialect = .qwenFunction
+        case .explicit(.qwenBracket): dialect = .qwenBracket
         case .explicit(.mistral): dialect = .mistral
         case .declaredArgs: dialect = .declaredArgs
         case .nativeFrame, .nativeUntilEOS, .nativeInlineJSON, .nativeNamedJSON, .opaqueJSONValue,
@@ -1237,12 +1247,16 @@ struct TextToolCallRecoveryScanner: Sendable {
     ) -> ToolCall? {
         let call: ToolCall?
         switch kind {
+        case .qwenBracket:
+            call = QwenBracketToolCallParser().parse(content: raw, tools: tools)
         case .toolCallFrame:
             guard allowMissingOuterEnd || raw.contains("</tool_call>") else { return nil }
             call = framedParser.parse(content: raw, tools: tools)
         case .gemma4:
             guard allowMissingOuterEnd || raw.contains("<tool_call|>") else { return nil }
-            call = gemmaParser.parse(content: raw, tools: tools)
+            let calls = gemmaParser.parseCalls(content: raw, tools: tools)
+            guard calls.count == 1 else { return nil }
+            call = calls.first
         case .qwenFunction:
             call = parseStrictQwenFunction(raw, allowMissingFunctionClose: allowMissingOuterEnd)
         case .mistral:
@@ -1295,6 +1309,8 @@ struct TextToolCallRecoveryScanner: Sendable {
     /// Best-effort function-name extraction for rejection diagnostics.
     private func extractToolName(from raw: String, kind: ExplicitKind) -> String? {
         switch kind {
+        case .qwenBracket:
+            return QwenBracketToolCallParser().toolName(in: raw)
         case .qwenFunction:
             return extractXMLFunctionName(from: raw)
         case .toolCallFrame:

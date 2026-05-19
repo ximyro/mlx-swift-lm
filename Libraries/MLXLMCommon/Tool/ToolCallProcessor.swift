@@ -802,11 +802,12 @@ public class ToolCallProcessor {
                 let trailingToken = String(toolCallBuffer[frameEnd...])
 
                 // Parse the tool call using the parser.
-                if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
+                let calls = parser.parseCalls(content: bufferedToolCall, tools: tools)
+                if !calls.isEmpty {
                     if !leadingTokenWasRecorded {
                         recordResponse(leadingToken ?? "")
                     }
-                    appendToolCall(toolCall, rawText: bufferedToolCall)
+                    _ = appendToolCalls(calls, rawText: bufferedToolCall)
                     state = .normal
                     toolCallBuffer = ""
 

@@ -36,6 +36,9 @@ public protocol ToolCallParser: Sendable {
     /// - Returns: A `ToolCall` if parsing succeeds, `nil` otherwise
     func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall?
 
+    /// Parse all calls in one complete protocol frame, in source order.
+    func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall]
+
     /// Parse remaining buffered content at end-of-sequence.
     ///
     /// Called when generation ends to extract any tool calls still in the buffer.
@@ -48,13 +51,17 @@ extension ToolCallParser {
     public var supportsBareJSON: Bool { false }
     public var supportsMarkerlessNamedJSON: Bool { false }
 
+    public func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        parse(content: content, tools: tools).map { [$0] } ?? []
+    }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
                 toolCallBuffer
                 .components(separatedBy: startTag)
                 .filter { !$0.isEmpty }
-                .compactMap { parse(content: $0, tools: tools) }
+                .flatMap { parseCalls(content: $0, tools: tools) }
         } else {
             guard let toolCall = parse(content: toolCallBuffer, tools: tools) else {
                 return []
