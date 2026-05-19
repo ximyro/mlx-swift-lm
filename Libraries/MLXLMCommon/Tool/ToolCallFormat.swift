@@ -74,6 +74,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
     case xmlFunction = "xml_function"
 
+    /// Qwen family format accepting JSON, bracket, and XML function tool calls.
+    /// Examples: `<tool_call>{"name":"f","arguments":{}}</tool_call>`,
+    /// `[Calling tool: f({"x": 1})]`, `<function=f><parameter=x>1</parameter></function>`
+    case qwen
+
     /// GLM4 format with arg_key/arg_value tags.
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
     case glm4
@@ -115,6 +120,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
                 startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        case .qwen:
+            return QwenToolCallParser()
         case .glm4:
             return GLM4ToolCallParser()
         case .gemma:
@@ -188,14 +195,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .xmlFunction
         }
 
-        // Qwen3.5 family (qwen3_5, qwen3_5_moe, etc.)
-        if type.hasPrefix("qwen3_5") {
-            return .xmlFunction
-        }
-
-        // Qwen3-Next family (qwen3_next, etc.)
-        if type.hasPrefix("qwen3_next") {
-            return .xmlFunction
+        // Qwen family. QwenToolCallParser is a superset of the existing XML
+        // function parser and also handles JSON and bracket forms.
+        if type.hasPrefix("qwen") {
+            return .qwen
         }
 
         // Mistral3 family (mistral3, mistral3_text, etc.)

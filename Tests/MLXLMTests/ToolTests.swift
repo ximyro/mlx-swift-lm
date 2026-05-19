@@ -396,6 +396,84 @@ struct ToolTests {
         #expect(toolCall.function.arguments.isEmpty)
     }
 
+    @Test("Test Qwen Parser - JSON tool_call Format")
+    func testQwenParserJSONToolCall() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        _ = processor.processChunk(
+            #"<tool_call>{"name":"get_weather","arguments":{"location":"Paris","days":2}}</tool_call>"#)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Paris"))
+        #expect(toolCall.function.arguments["days"] == .int(2))
+    }
+
+    @Test("Test Qwen Parser - Bracket Format")
+    func testQwenParserBracketToolCall() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let chunks = ["[Calling", " tool: search({\"query\":\"swift\", \"limit\":3})]"]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+        #expect(toolCall.function.arguments["limit"] == .int(3))
+    }
+
+    @Test("Test Qwen Parser - Bare Function Format")
+    func testQwenParserBareFunctionToolCall() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let chunks = [
+            "<function=set_temperature>",
+            "<parameter=value>25</parameter>",
+            "<parameter=enabled>true</parameter>",
+            "</function>",
+        ]
+
+        for chunk in chunks {
+            _ = processor.processChunk(chunk)
+        }
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "set_temperature")
+        #expect(toolCall.function.arguments["value"] == .int(25))
+        #expect(toolCall.function.arguments["enabled"] == .bool(true))
+    }
+
+    @Test("Test Qwen Parser - Finds Tool Call After Thinking Close Tag")
+    func testQwenParserFindsToolCallAfterThinkingCloseTag() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let emitted = processor.processChunk(
+            #"</think>\n\n<tool_call>{"name":"read","arguments":{"filePath":"/tmp/a.go"}}</tool_call>"#)
+
+        #expect(emitted == #"</think>\n\n"#)
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "read")
+        #expect(toolCall.function.arguments["filePath"] == .string("/tmp/a.go"))
+    }
+
+    @Test("Test Qwen Parser - Finds Bare Function After Thinking Close Tag")
+    func testQwenParserFindsBareFunctionAfterThinkingCloseTag() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let emitted = processor.processChunk(
+            "</think>\n\n<function=read><parameter=filePath>/tmp/a.go</parameter></function>")
+
+        #expect(emitted == "</think>\n\n")
+        #expect(processor.toolCalls.count == 1)
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "read")
+        #expect(toolCall.function.arguments["filePath"] == .string("/tmp/a.go"))
+    }
+
     // MARK: - GLM4 Format Tests
 
     @Test("Test GLM4 Tool Call Parser")
@@ -636,15 +714,16 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "NEMOTRON_H") == .xmlFunction)
 
-        // Qwen3.5 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_5") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .xmlFunction)
-
-        // Qwen3-Next models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
+        // Qwen models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "qwen") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen2") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen3") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen3_5") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .qwen)
+        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen3_next") == .qwen)
+        #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .qwen)
+        #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .qwen)
 
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
@@ -681,7 +760,6 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "llama", configData: llama2Config) == nil)
 
         // Unknown models should return nil (use default JSON format)
-        #expect(ToolCallFormat.infer(from: "qwen2") == nil)
         #expect(ToolCallFormat.infer(from: "mistral") == nil)
     }
 

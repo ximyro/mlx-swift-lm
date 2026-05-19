@@ -9,69 +9,228 @@ public struct Gemma4FunctionParser: ToolCallParser, Sendable {
     public let endTag: String? = "<tool_call|>"
 
     private let escapeMarker = "<|\"|>"
+    private let maxArgumentBlockLength = 1_048_576
 
     public init() {}
 
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Strip tags if present
-        var text = content
-        if let start = startTag {
-            text = text.replacingOccurrences(of: start, with: "")
-        }
-        if let end = endTag {
-            text = text.replacingOccurrences(of: end, with: "")
-        }
+        parseCalls(in: content).first
+    }
 
-        // Pattern: call:(\w+)\{(.*?)\}
-        // Find "call:" followed by function name and arguments in braces
-        guard let callRange = text.range(of: "call:") else { return nil }
+    public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        parseCalls(in: toolCallBuffer)
+    }
 
-        let remaining = String(text[callRange.upperBound...])
+    private func parseCalls(in content: String) -> [ToolCall] {
+        let text = stripThinkTags(from: content)
+        let block = extractToolCallBlock(from: text)
+        var calls: [ToolCall] = []
+        var searchStart = block.startIndex
 
-        // Extract function name (word characters until {)
-        guard let braceStart = remaining.firstIndex(of: "{") else { return nil }
-        let funcName = String(remaining[..<braceStart])
+        while let callRange = block.range(of: "call:", range: searchStart..<block.endIndex) {
+            var nameStart = callRange.upperBound
+            while nameStart < block.endIndex, block[nameStart].isWhitespace {
+                nameStart = block.index(after: nameStart)
+            }
 
-        guard !funcName.isEmpty else { return nil }
+            var nameEnd = nameStart
+            while nameEnd < block.endIndex, isFunctionNameCharacter(block[nameEnd]) {
+                nameEnd = block.index(after: nameEnd)
+            }
 
-        // Extract arguments string (everything between { and })
-        guard let braceEnd = remaining.lastIndex(of: "}") else { return nil }
-        var argsStr = String(remaining[remaining.index(after: braceStart) ..< braceEnd])
-
-        var arguments: [String: any Sendable] = [:]
-
-        // Parse key:value pairs
-        while !argsStr.isEmpty {
-            // Find the key (everything before :)
-            guard let colonIdx = argsStr.firstIndex(of: ":") else { break }
-            let key = String(argsStr[..<colonIdx])
-            argsStr = String(argsStr[argsStr.index(after: colonIdx)...])
-
-            // Handle escaped strings
-            if argsStr.hasPrefix(escapeMarker) {
-                argsStr = String(argsStr.dropFirst(escapeMarker.count))
-                guard let endEscape = argsStr.range(of: escapeMarker) else { break }
-                let value = String(argsStr[..<endEscape.lowerBound])
-                arguments[key] = value
-                argsStr = String(argsStr[endEscape.upperBound...])
-                // Skip comma if present
-                if argsStr.hasPrefix(",") {
-                    argsStr = String(argsStr.dropFirst())
-                }
+            guard nameEnd > nameStart else {
+                searchStart = callRange.upperBound
                 continue
             }
 
-            // Handle regular values (until comma or end)
-            let commaIdx = argsStr.firstIndex(of: ",") ?? argsStr.endIndex
-            let value = String(argsStr[..<commaIdx])
-            argsStr =
-                commaIdx < argsStr.endIndex
-                ? String(argsStr[argsStr.index(after: commaIdx)...]) : ""
+            var braceStart = nameEnd
+            while braceStart < block.endIndex, block[braceStart].isWhitespace {
+                braceStart = block.index(after: braceStart)
+            }
+            guard braceStart < block.endIndex, block[braceStart] == "{" else {
+                searchStart = nameEnd
+                continue
+            }
 
-            // Try JSON decode, fallback to string
-            arguments[key] = tryParseJSON(value) ?? value
+            guard let braceEnd = findBalancedBrace(in: block, startingAt: braceStart) else {
+                searchStart = block.index(after: braceStart)
+                continue
+            }
+
+            let funcName = String(block[nameStart..<nameEnd])
+            let argsRaw = String(block[braceStart...braceEnd])
+
+            if let arguments = parseArguments(argsRaw) {
+                calls.append(ToolCall(function: .init(name: funcName, arguments: arguments)))
+            }
+
+            searchStart = block.index(after: braceEnd)
         }
 
-        return ToolCall(function: .init(name: funcName, arguments: arguments))
+        return calls
+    }
+
+    private func stripThinkTags(from text: String) -> String {
+        var result = text
+        while let start = result.range(of: "<think>") {
+            guard let end = result.range(of: "</think>", range: start.upperBound..<result.endIndex)
+            else {
+                result.removeSubrange(start.lowerBound..<result.endIndex)
+                break
+            }
+            result.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        return result
+    }
+
+    private func extractToolCallBlock(from text: String) -> String {
+        guard let startTag, let start = text.range(of: startTag) else {
+            var stripped = text
+            if let endTag {
+                stripped = stripped.replacingOccurrences(of: endTag, with: "")
+            }
+            return stripped
+        }
+
+        let blockStart = start.upperBound
+        if let endTag, let end = text.range(of: endTag, range: blockStart..<text.endIndex) {
+            return String(text[blockStart..<end.lowerBound])
+        }
+        return String(text[blockStart...])
+    }
+
+    private func findBalancedBrace(in text: String, startingAt start: String.Index) -> String.Index? {
+        guard text[start] == "{" else { return nil }
+        if text.distance(from: start, to: text.endIndex) > maxArgumentBlockLength {
+            return nil
+        }
+
+        var depth = 0
+        var index = start
+        var inEscapedString = false
+
+        while index < text.endIndex {
+            if text[index...].hasPrefix(escapeMarker) {
+                inEscapedString.toggle()
+                index = text.index(index, offsetBy: escapeMarker.count)
+                continue
+            }
+
+            if !inEscapedString {
+                if text[index] == "{" {
+                    depth += 1
+                } else if text[index] == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        return index
+                    }
+                }
+            }
+
+            index = text.index(after: index)
+        }
+
+        return nil
+    }
+
+    private func parseArguments(_ raw: String) -> [String: any Sendable]? {
+        let jsonText = gemma4ArgumentsToJSON(raw)
+        guard let data = jsonText.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any]
+        else {
+            return nil
+        }
+
+        return dict.mapValues(asSendable)
+    }
+
+    private func gemma4ArgumentsToJSON(_ raw: String) -> String {
+        var strings: [String] = []
+        var text = extractEscapedStrings(from: raw, into: &strings)
+        text = replaceRegex(#"(?<=[{,])\s*(\w+)\s*:"#, in: text) { match, text in
+            guard let keyRange = Range(match.range(at: 1), in: text) else { return nil }
+            return "\"\(String(text[keyRange]))\":"
+        }
+        text = replaceRegex(#"(?<=[:\[,])(\s*)([A-Za-z_][\w\-]*)(?=\s*[,}\]])"#, in: text) {
+            match, text in
+            guard let wsRange = Range(match.range(at: 1), in: text),
+                  let wordRange = Range(match.range(at: 2), in: text)
+            else { return nil }
+
+            let word = String(text[wordRange])
+            if ["true", "false", "null"].contains(word) {
+                return String(text[Range(match.range, in: text)!])
+            }
+            return String(text[wsRange]) + jsonStringLiteral(word)
+        }
+
+        return replaceRegex(#"@@(\d+)@@"#, in: text) { match, text in
+            guard let idxRange = Range(match.range(at: 1), in: text),
+                  let idx = Int(text[idxRange]),
+                  strings.indices.contains(idx)
+            else { return nil }
+            return jsonStringLiteral(strings[idx])
+        }
+    }
+
+    private func extractEscapedStrings(from text: String, into strings: inout [String]) -> String {
+        var result = ""
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            guard text[index...].hasPrefix(escapeMarker) else {
+                result.append(text[index])
+                index = text.index(after: index)
+                continue
+            }
+
+            let valueStart = text.index(index, offsetBy: escapeMarker.count)
+            guard let valueEnd = text.range(of: escapeMarker, range: valueStart..<text.endIndex)
+            else {
+                result.append(contentsOf: text[index...])
+                break
+            }
+
+            strings.append(String(text[valueStart..<valueEnd.lowerBound]))
+            result += "@@\(strings.count - 1)@@"
+            index = valueEnd.upperBound
+        }
+
+        return result
+    }
+
+    private func replaceRegex(
+        _ pattern: String,
+        in text: String,
+        transform: (NSTextCheckingResult, String) -> String?
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        var result = text
+        let matches = regex.matches(
+            in: text,
+            range: NSRange(text.startIndex..<text.endIndex, in: text)
+        )
+
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let replacement = transform(match, result) ?? String(result[range])
+            result.replaceSubrange(range, with: replacement)
+        }
+
+        return result
+    }
+
+    private func jsonStringLiteral(_ value: String) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let encoded = String(data: data, encoding: .utf8)
+        else {
+            return "\"\(value)\""
+        }
+        return encoded
+    }
+
+    private func isFunctionNameCharacter(_ char: Character) -> Bool {
+        char.isLetter || char.isNumber || char == "_"
     }
 }
