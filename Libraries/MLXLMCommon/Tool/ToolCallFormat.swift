@@ -19,6 +19,14 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
+    /// Alternate native openers, including a single call without its section wrapper.
+    var startTags: [String] { get }
+
+    func endTag(forStartTag startTag: String) -> String?
+
+    /// Index after a structurally complete native frame.
+    func frameEnd(in content: String) -> String.Index?
+
     /// Whether an unframed JSON object is native call syntax for this parser.
     var supportsBareJSON: Bool { get }
 
@@ -48,6 +56,17 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    public var startTags: [String] { startTag.map { [$0] } ?? [] }
+
+    public func endTag(forStartTag startTag: String) -> String? { endTag }
+
+    public func frameEnd(in content: String) -> String.Index? {
+        if startTag == ToolCallFrameScanner.startTag, endTag == ToolCallFrameScanner.endTag {
+            return ToolCallFrameScanner.frameEnd(in: content)
+        }
+        return endTag.flatMap { content.range(of: $0)?.upperBound }
+    }
+
     public var supportsBareJSON: Bool { false }
     public var supportsMarkerlessNamedJSON: Bool { false }
 
@@ -120,6 +139,9 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
     case kimiK2 = "kimi_k2"
 
+    /// DeepSeek V3/R1's Unicode markers and JSON argument blocks.
+    case deepseek
+
     /// MiniMax M2 format with invoke/parameter tags.
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
@@ -175,6 +197,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                 startTag: "<|tool_call>", endTag: "<tool_call|>", escapeMarker: "<|\"|>")
         case .kimiK2:
             return KimiK2ToolCallParser()
+        case .deepseek:
+            return DeepSeekToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
         case .miniCPM5:
@@ -240,7 +264,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
                 toolCallPolicy: toolCallPolicy)
 
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .deepseek,
+            .minimaxM2,
             .miniCPM5, .mistral, .llama3:
             return nil
         }
@@ -262,7 +287,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .deepseek,
+            .minimaxM2,
             .miniCPM5, .mistral,
             .llama3:
             return []
@@ -284,7 +310,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                     count += message.tool?.calls?.count ?? 0
                 }
             }
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .deepseek,
+            .minimaxM2,
             .miniCPM5, .mistral, .llama3:
             0
         }

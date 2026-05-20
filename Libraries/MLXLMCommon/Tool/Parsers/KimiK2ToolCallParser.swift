@@ -2,61 +2,67 @@
 
 import Foundation
 
-/// Parser for Kimi K2 format: functions.name:0<|tool_call_argument_begin|>{JSON}
-/// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tool_parsers/kimi_k2.py
-public struct KimiK2ToolCallParser: ToolCallParser, Sendable {
+/// Parses Kimi/Moonshot sections and individual calls with complete JSON arguments.
+public struct KimiK2ToolCallParser: ToolCallParser {
     public let startTag: String? = "<|tool_calls_section_begin|>"
     public let endTag: String? = "<|tool_calls_section_end|>"
+    public let startTags = [
+        "<|tool_calls_section_begin|>", "<|tool_call_section_begin|>", "<|tool_call_begin|>",
+    ]
+    private let scanner = JSONToolCallFrameScanner(
+        sections: [
+            ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"),
+            ("<|tool_call_section_begin|>", "<|tool_call_section_end|>"),
+        ],
+        callStart: "<|tool_call_begin|>", callEnd: "<|tool_call_end|>",
+        allowsUnwrappedCall: true)
 
     public init() {}
 
+    public func endTag(forStartTag startTag: String) -> String? {
+        switch startTag {
+        case "<|tool_calls_section_begin|>": return "<|tool_calls_section_end|>"
+        case "<|tool_call_section_begin|>": return "<|tool_call_section_end|>"
+        default: return "<|tool_call_end|>"
+        }
+    }
+
+    public func frameEnd(in content: String) -> String.Index? { scanner.scan(content)?.end }
+
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
-        // Strip outer tags if present
-        var text = content
-        if let start = startTag {
-            text = text.replacingOccurrences(of: start, with: "")
+        parseCalls(content: content, tools: tools).first
+    }
+
+    public func parseEOS(_ content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        parseCalls(content: content, tools: tools)
+    }
+
+    public func parseCalls(content: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let frame = scanner.scan(text) else {
+            guard !startTags.contains(where: text.hasPrefix) else { return [] }
+            return parseBody(text[...]).map { [$0] } ?? []
         }
-        if let end = endTag {
-            text = text.replacingOccurrences(of: end, with: "")
-        }
+        guard text[frame.end...].allSatisfy(\.isWhitespace) else { return [] }
+        let calls = frame.bodies.compactMap(parseBody)
+        return calls.count == frame.bodies.count ? calls : []
+    }
 
-        // Strip inner tags
-        text = text.replacingOccurrences(of: "<|tool_call_begin|>", with: "")
-        text = text.replacingOccurrences(of: "<|tool_call_end|>", with: "")
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Pattern: (.+):\d+\s*<|tool_call_argument_begin|>
-        // Find the function name (before :N<|tool_call_argument_begin|>)
-        guard let argBeginRange = text.range(of: "<|tool_call_argument_begin|>") else { return nil }
-
-        let beforeArgBegin = String(text[..<argBeginRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Find the last colon followed by a number
-        guard let lastColonIdx = beforeArgBegin.lastIndex(of: ":") else { return nil }
-
-        var funcName = String(beforeArgBegin[..<lastColonIdx])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Strip "functions." prefix if present
-        if funcName.hasPrefix("functions.") {
-            funcName = String(funcName.dropFirst("functions.".count))
-        } else if let dotIdx = funcName.firstIndex(of: ".") {
-            // Also handle other prefixes like "tools."
-            funcName = String(funcName[funcName.index(after: dotIdx)...])
-        }
-
-        guard !funcName.isEmpty else { return nil }
-
-        // Extract arguments JSON (everything after <|tool_call_argument_begin|>)
-        let argsStr = String(text[argBeginRange.upperBound...])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Deserialize the JSON arguments
-        guard let arguments = tryParseJSON(argsStr) as? [String: any Sendable] else {
+    private func parseBody(_ body: Substring) -> ToolCall? {
+        guard let argumentsStart = body.range(of: "<|tool_call_argument_begin|>") else {
             return nil
         }
-
-        return ToolCall(function: .init(name: funcName, arguments: arguments))
+        var name = body[..<argumentsStart.lowerBound].trimmingWhitespace()
+        if let colon = name.lastIndex(of: ":") {
+            let index = name[name.index(after: colon)...]
+            guard !index.isEmpty, index.allSatisfy(\.isNumber) else { return nil }
+            name = name[..<colon]
+        }
+        if let dot = name.firstIndex(of: ".") { name = name[name.index(after: dot)...] }
+        guard !name.isEmpty, !name.contains(where: { $0.isWhitespace || "<>{}".contains($0) }),
+            let arguments = tryParseJSON(String(body[argumentsStart.upperBound...]))
+                as? [String: any Sendable]
+        else { return nil }
+        return ToolCall(function: .init(name: String(name), arguments: arguments))
     }
 }

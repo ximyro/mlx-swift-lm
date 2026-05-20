@@ -115,6 +115,7 @@ struct TextToolCallRecoveryScanner: Sendable {
     private let supportsBareJSON: Bool
     private var jsonPrefixScanner = JSONPrefixScanner()
     private let primaryFormat: ToolCallFormat
+    private let primaryParser: any ToolCallParser
     private let policy: ToolCallRecoveryPolicy
     private let tools: [[String: any Sendable]]
     private let allowedToolNames: Set<String>
@@ -169,6 +170,7 @@ struct TextToolCallRecoveryScanner: Sendable {
         self.maximumBufferedByteCount = maximumBufferedByteCount
 
         let primaryParser = primaryFormat.createParser()
+        self.primaryParser = primaryParser
         self.supportsBareJSON = primaryParser.supportsBareJSON
         self.namedJSONScanner =
             primaryParser.supportsMarkerlessNamedJSON
@@ -176,9 +178,9 @@ struct TextToolCallRecoveryScanner: Sendable {
         var signals: [Signal] = []
         // Native markers win ties. Alternate dialects may never steal a
         // frame which the selected parser already owns (for example GLM4).
-        if let start = primaryParser.startTag {
+        for start in primaryParser.startTags {
             let kind: Kind =
-                primaryParser.endTag.map { .nativeFrame(endMarker: $0) }
+                primaryParser.endTag(forStartTag: start).map { .nativeFrame(endMarker: $0) }
                 ?? .nativeUntilEOS
             signals.append(Signal(text: start, kind: kind))
         }
@@ -368,9 +370,7 @@ struct TextToolCallRecoveryScanner: Sendable {
                 let frameEnd: String.Index? =
                     !markerMayHaveArrived
                     ? nil
-                    : endMarker == ToolCallFrameScanner.endTag
-                        ? ToolCallFrameScanner.frameEnd(in: buffer)
-                        : buffer.range(of: endMarker).map(\.upperBound)
+                    : primaryParser.frameEnd(in: buffer)
                 if let frameEnd {
                     let raw = String(buffer[..<frameEnd])
                     buffer = String(buffer[frameEnd...])
