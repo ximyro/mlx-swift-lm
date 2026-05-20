@@ -101,24 +101,37 @@ public struct ModelConfiguration: Sendable {
     /// Additional tokens to use for end of string (specified as strings, converted to IDs at runtime)
     public var extraEOSTokens: Set<String>
 
-    /// EOS token IDs loaded from config.json/generation_config.json
+    /// EOS token IDs used during generation.
+    ///
+    /// At load time this set is populated by merging:
+    /// - IDs from the model's `config.json` / `generation_config.json` (loaded at runtime)
+    /// - Any additional IDs provided by the registry / caller at registration time
+    ///   (e.g. `eosTokenIds: [0]` in ``LLMRegistry`` for Gemma-4 pad-token workaround)
     public var eosTokenIds: Set<Int> = []
 
     /// Tool call format for this model (nil = default JSON format)
     public var toolCallFormat: ToolCallFormat?
+
+    /// If true, model weights are loaded lazily via mmap and not evaluated during loading.
+    public var lazyLoad: Bool = false
 
     public init(
         id: String, revision: String = "main",
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        eosTokenIds: Set<Int> = [],
+        toolCallFormat: ToolCallFormat? = nil,
+        preparePrompt: (@Sendable (String) -> String)? = nil,
+        lazyLoad: Bool = false
     ) {
         self.id = .id(id, revision: revision)
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.lazyLoad = lazyLoad
     }
 
     public init(
@@ -127,7 +140,8 @@ public struct ModelConfiguration: Sendable {
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
         eosTokenIds: Set<Int> = [],
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        lazyLoad: Bool = false
     ) {
         self.id = .directory(directory)
         self.tokenizerSource = tokenizerSource
@@ -135,6 +149,7 @@ public struct ModelConfiguration: Sendable {
         self.extraEOSTokens = extraEOSTokens
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
+        self.lazyLoad = lazyLoad
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -152,7 +167,8 @@ public struct ModelConfiguration: Sendable {
             defaultPrompt: defaultPrompt,
             extraEOSTokens: extraEOSTokens,
             eosTokenIds: eosTokenIds,
-            toolCallFormat: toolCallFormat)
+            toolCallFormat: toolCallFormat,
+            lazyLoad: lazyLoad)
     }
 
 }

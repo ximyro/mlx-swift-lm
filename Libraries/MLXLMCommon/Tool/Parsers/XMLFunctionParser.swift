@@ -60,9 +60,14 @@ public struct XMLFunctionParser: ToolCallParser, Sendable {
                 paramValue = String(paramValue.dropLast())
             }
 
-            // Convert value based on schema type
-            arguments[paramName] = convertParameterValue(
-                paramValue, paramName: paramName, funcName: funcName, tools: tools)
+            // Convert value based on schema type. Without a schema, mirror Qwen
+            // parser behavior by accepting JSON literals before falling back to text.
+            if getParameterType(funcName: funcName, paramName: paramName, tools: tools) != nil {
+                arguments[paramName] = convertParameterValue(
+                    paramValue, paramName: paramName, funcName: funcName, tools: tools)
+            } else {
+                arguments[paramName] = tryParseJSON(paramValue) ?? paramValue
+            }
 
             searchRange = paramEnd.upperBound ..< paramSection.endIndex
         }

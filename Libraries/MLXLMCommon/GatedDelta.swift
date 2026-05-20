@@ -298,7 +298,8 @@ public func gatedDeltaUpdate(
         state = state.asType(.float32)
     }
 
-    if GatedDeltaKernelManager.shared.kernel != nil {
+    let isCPU = Device.defaultDevice().deviceType == .cpu
+    if !isCPU, GatedDeltaKernelManager.shared.kernel != nil {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 

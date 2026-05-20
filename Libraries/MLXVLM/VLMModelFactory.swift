@@ -3,7 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import MLXNN
+import MLXLLM
 
 public enum VLMError: LocalizedError, Equatable {
     case imageRequired
@@ -91,6 +91,7 @@ public enum VLMTypeRegistry {
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4.init),
         "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
+        // TODO: see if we can make it work with fastvlm rather than llava_qwen2
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
         "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
@@ -211,25 +212,29 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma4_E2B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let gemma4_E4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let gemma4_31B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-31b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-26b-a4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let smolvlm = ModelConfiguration(
@@ -287,10 +292,7 @@ public typealias ModelRegistry = VLMRegistry
 /// let modelContainer = try await VLMModelFactory.shared.loadContainer(
 ///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
-public final class VLMModelFactory: GenericModelFactory {
-
-    public typealias ContextType = ModelContext
-    public typealias ContainerType = ModelContainer
+public final class VLMModelFactory: ModelFactory {
 
     public init(
         typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
@@ -359,6 +361,7 @@ public final class VLMModelFactory: GenericModelFactory {
         }
 
         var mutableConfiguration = configuration
+        eosTokenIds.formUnion(configuration.eosTokenIds)
         mutableConfiguration.eosTokenIds = eosTokenIds
 
         // Auto-detect tool call format from model type if not explicitly set
@@ -377,7 +380,8 @@ public final class VLMModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            lazyLoad: configuration.lazyLoad)
 
         let tokenizer = try await tokenizerTask
         let processorConfigData: Data

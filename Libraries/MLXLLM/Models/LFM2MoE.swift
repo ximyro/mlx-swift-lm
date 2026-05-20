@@ -359,7 +359,7 @@ class LFM2MoEDecoderLayer: Module {
     }
 }
 
-public class LFM2MoEModelInner: Module {
+public class LFM2MoEModelInner: Module, LayerPartitionable, StreamableMoE {
     let args: LFM2MoEConfiguration
     let layers: [LFM2MoEDecoderLayer]
     let firstAttentionIndex: Int?
@@ -367,6 +367,10 @@ public class LFM2MoEModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
+    
+    public var gpuLayerCount: Int? = nil
+    public var streamExperts: Bool = false
+    public var totalLayerCount: Int { layers.count }
 
     init(_ args: LFM2MoEConfiguration) {
         self.args = args
@@ -408,7 +412,9 @@ public class LFM2MoEModelInner: Module {
         }()
 
         for (i, layer) in layers.enumerated() {
-            hidden = layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            hidden = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
+                layer(hidden, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache?[i])
+            }
         }
 
         return embeddingNorm(hidden)

@@ -919,6 +919,7 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
             "content":
                 message.images.map { _ in ["type": "image"] }
                 + message.videos.map { _ in ["type": "video"] }
+                + message.audio.map { _ in ["type": "audio"] }
                 + [["type": "text", "text": message.content]],
         ]
     }

@@ -1,0 +1,53 @@
+name: 🔄 Auto-Sync Upstream
+
+on:
+  schedule:
+    - cron: '30 4 * * *' # Every day at 4:30 AM UTC
+  workflow_dispatch: # Enable manual triggers
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream Remote
+        run: git remote add upstream https://github.com/ml-explore/mlx-swift-lm.git
+
+      - name: Fetch Upstream
+        run: git fetch upstream
+
+      - name: Create or Update Sync Branch
+        run: |
+          git checkout -B sync/upstream-latest
+          # Merge upstream instead of hard reset so SharpAI-specific changes
+          # (Package.swift fork dependencies, custom op hooks) are preserved.
+          git merge upstream/main --no-edit --strategy-option=ours --allow-unrelated-histories || true
+          # Always restore the SharpAI fork dependency — upstream will overwrite
+          # this with ml-explore/mlx-swift, which lacks TurboKV/SSD Metal ops.
+          # The tag is bumped separately by update_dependencies.yml.
+          CURRENT_TAG=$(grep -oP '(?<=exact: ")([^"]+)' Package.swift || echo "0.30.6")
+          sed -i "s|package(url: \"https://github.com/ml-explore/mlx-swift.*|package(url: \"https://github.com/SharpAI/mlx-swift.git\", exact: \"${CURRENT_TAG}\"),|" Package.swift
+          git add Package.swift
+          git diff --cached --quiet || git commit -m "chore(sync): restore SharpAI mlx-swift fork dependency after upstream merge"
+          git push -f origin sync/upstream-latest
+
+      - name: Create Pull Request to Main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create --base main --head sync/upstream-latest \
+            --title "🔄 Auto-Sync: Apple Upstream Repository" \
+            --body "Automated PR to synchronize SharpAI fork with Apple mlx-swift-lm upstream repository. Please review merge conflicts (if any) and verify CI pipelines." || echo "PR already exists or no changes"

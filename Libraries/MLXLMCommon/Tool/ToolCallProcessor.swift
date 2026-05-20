@@ -33,6 +33,7 @@ public class ToolCallProcessor {
     private let jsonObjectScanner = JSONLeadingObjectScanner(startCharacter: "{")
     private var state = State.normal
     private var toolCallBuffer = ""
+    private var activeEndTags: [String] = []
 
     /// The tool calls extracted during processing.
     public var toolCalls: [ToolCall] = []
@@ -74,6 +75,24 @@ public class ToolCallProcessor {
     /// The first character of the start tag for quick detection.
     private var startTagFirstChar: Character? {
         parser.startTag?.first
+    }
+
+    private var startTags: [String] {
+        if let taggedParser = parser as? any TaggedToolCallParser {
+            return taggedParser.startTags
+        }
+        return parser.startTag.map { [$0] } ?? []
+    }
+
+    private var startTagFirstChars: Set<Character> {
+        Set(startTags.compactMap(\.first))
+    }
+
+    private func endTags(for startTag: String) -> [String] {
+        if let taggedParser = parser as? any TaggedToolCallParser {
+            return taggedParser.endTags(forStartTag: startTag)
+        }
+        return parser.endTag.map { [$0] } ?? []
     }
 
     // MARK: - Public Methods
@@ -129,6 +148,7 @@ public class ToolCallProcessor {
         else { return nil }
         guard !toolCallBuffer.isEmpty else {
             state = .normal
+            activeEndTags = []
             return nil
         }
 
@@ -137,6 +157,7 @@ public class ToolCallProcessor {
         toolCalls.append(contentsOf: parsedCalls)
 
         toolCallBuffer = ""
+        activeEndTags = []
         state = .normal
 
         return returnBufferedText && parsedCalls.isEmpty ? buffered : nil
@@ -215,17 +236,19 @@ public class ToolCallProcessor {
 
     /// Process chunk for tagged formats.
     private func processTaggedChunk(_ chunk: String) -> String? {
-        guard let startTag = parser.startTag,
-            let startChar = startTagFirstChar
-        else {
+        let startTags = self.startTags
+        guard !startTags.isEmpty else {
             return chunk
         }
 
-        let startMode =
-            state == .normal
-            ? taggedStartMode(in: chunk, startChar: startChar)
-            : .none
-        guard startMode != .none || state != .normal else {
+        let firstChars = startTagFirstChars
+        guard
+            (state == .normal
+                && (chunk.contains { firstChars.contains($0) }
+                    || (supportsBareJSONFallback
+                        && chunk.contains(jsonObjectScanner.startCharacter))))
+                || state != .normal
+        else {
             return chunk
         }
 
@@ -234,38 +257,55 @@ public class ToolCallProcessor {
 
         switch state {
         case .normal:
-            if startMode == .bareJSON {
-                // Fallback for models that sporadically emit bare JSON tool calls.
-                state = .collectingJSONToolCall
+            let firstStartRange = firstRange(of: startTags, in: toolCallBuffer)
+            if supportsBareJSONFallback,
+                let jsonStart = toolCallBuffer.firstIndex(of: jsonObjectScanner.startCharacter),
+                firstStartRange == nil || jsonStart < firstStartRange!.lowerBound
+            {
+                if case .invalidObject = jsonObjectScanner.evaluatePrefix(
+                    in: toolCallBuffer, from: jsonStart)
+                {
+                    // Fall through to tagged parsing below.
+                } else {
+                    // Fallback for models that sporadically emit bare JSON tool calls.
+                    state = .collectingJSONToolCall
+                    leadingToken = String(toolCallBuffer[..<jsonStart])
+                    toolCallBuffer = String(toolCallBuffer[jsonStart...])
 
+                    return processCollectingJSONToolCall(
+                        startTag: startTags[0],
+                        startChar: startTags[0].first ?? jsonObjectScanner.startCharacter,
+                        leadingToken: leadingToken
+                    )
+                }
+            }
+
+            if let startRange = firstStartRange {
+                let startTag = String(toolCallBuffer[startRange])
                 leadingToken = separateToken(
-                    from: &toolCallBuffer,
-                    separator: String(jsonObjectScanner.startCharacter),
-                    returnLeading: true
-                )
-
-                return processCollectingJSONToolCall(
-                    startTag: startTag,
-                    startChar: startChar,
-                    leadingToken: leadingToken
-                )
+                    from: &toolCallBuffer, separatorRange: startRange, returnLeading: true)
+                activeEndTags = endTags(for: startTag)
+                state = .collectingToolCall
+                fallthrough
+            } else if let partialRange = trailingPartialStartTagRange(
+                in: toolCallBuffer, tags: startTags)
+            {
+                leadingToken = String(toolCallBuffer[..<partialRange.lowerBound])
+                toolCallBuffer = String(toolCallBuffer[partialRange.lowerBound...])
+                state = .potentialToolCall
+                return leadingToken?.isEmpty ?? true ? nil : leadingToken
+            } else {
+                state = .normal
+                activeEndTags = []
+                let buffer = toolCallBuffer
+                toolCallBuffer = ""
+                return buffer
             }
-
-            guard startMode == .tagged else {
-                return chunk
-            }
-
-            // Change state to potential tagged tool call.
-            state = .potentialToolCall
-
-            leadingToken = separateToken(
-                from: &toolCallBuffer, separator: String(startChar), returnLeading: true)
-
-            fallthrough
 
         case .potentialToolCall:
-            if partialMatch(buffer: toolCallBuffer, tag: startTag) {
-                if toolCallBuffer.starts(with: startTag) {
+            if partialMatch(buffer: toolCallBuffer, tags: startTags) {
+                if let startTag = completedStartTag(in: toolCallBuffer, tags: startTags) {
+                    activeEndTags = endTags(for: startTag)
                     state = .collectingToolCall
                     fallthrough
                 } else {
@@ -274,61 +314,52 @@ public class ToolCallProcessor {
             } else {
                 // Otherwise, return the collected text and reset the state.
                 state = .normal
+                activeEndTags = []
                 let buffer = toolCallBuffer
                 toolCallBuffer = ""
                 return (leadingToken ?? "") + buffer
             }
 
         case .collectingToolCall:
-            guard let endTag = parser.endTag else {
+            let endTags = activeEndTags.isEmpty ? parser.endTag.map { [$0] } ?? [] : activeEndTags
+            guard !endTags.isEmpty else {
                 return nil
             }
 
-            if toolCallBuffer.contains(endTag) {
+            if let endRange = firstRange(of: endTags, in: toolCallBuffer) {
                 // Separate the trailing token.
                 let trailingToken = separateToken(
-                    from: &toolCallBuffer, separator: endTag, returnLeading: false)
+                    from: &toolCallBuffer, separatorRange: endRange, returnLeading: false)
 
                 let bufferedToolCall = toolCallBuffer
+                let parsedCalls = parser.parseEOS(bufferedToolCall, tools: tools)
+                toolCalls.append(contentsOf: parsedCalls)
 
-                // Parse the tool call using the parser.
-                if let toolCall = parser.parse(content: bufferedToolCall, tools: tools) {
-                    toolCalls.append(toolCall)
-                    state = .normal
-                    toolCallBuffer = ""
-
-                    // If trailing content may contain another tool call, recurse.
-                    if let trailingToken,
-                        tokenCouldContainToolStart(trailingToken, startChar: startChar)
-                    {
-                        return combine(leadingToken, processChunk(trailingToken))
-                    }
-
-                    // Otherwise, return trailing text if non-empty.
-                    let trailingText = trailingToken?.isEmpty ?? true ? nil : trailingToken
-                    return combine(leadingToken, trailingText)
-                }
-
-                // Preserve unparsed tagged payload as plain text, then continue scanning.
                 state = .normal
+                activeEndTags = []
                 toolCallBuffer = ""
+
+                let nextOutput: String?
                 if let trailingToken,
-                    tokenCouldContainToolStart(trailingToken, startChar: startChar)
+                    tokenCouldContainToolStart(trailingToken, startChars: firstChars)
                 {
-                    return combine(
-                        leadingToken,
-                        combine(bufferedToolCall, processChunk(trailingToken))
-                    )
+                    nextOutput = processChunk(trailingToken)
+                } else {
+                    nextOutput = trailingToken?.isEmpty ?? true ? nil : trailingToken
                 }
-                return combine(leadingToken, combine(bufferedToolCall, trailingToken))
+
+                if parsedCalls.isEmpty {
+                    return combine(leadingToken, combine(bufferedToolCall, nextOutput))
+                }
+                return combine(leadingToken, nextOutput)
             }
 
             return nil
 
         case .collectingJSONToolCall:
             return processCollectingJSONToolCall(
-                startTag: startTag,
-                startChar: startChar,
+                startTag: startTags[0],
+                startChar: startTags[0].first ?? jsonObjectScanner.startCharacter,
                 leadingToken: leadingToken
             )
         }
@@ -432,6 +463,11 @@ public class ToolCallProcessor {
             || (supportsBareJSONFallback && token.contains(jsonObjectScanner.startCharacter))
     }
 
+    private func tokenCouldContainToolStart(_ token: String, startChars: Set<Character>) -> Bool {
+        token.contains(where: { startChars.contains($0) })
+            || (supportsBareJSONFallback && token.contains(jsonObjectScanner.startCharacter))
+    }
+
     private func combine(_ first: String?, _ second: String?) -> String? {
         let merged = (first ?? "") + (second ?? "")
         return merged.isEmpty ? nil : merged
@@ -460,14 +496,71 @@ public class ToolCallProcessor {
         return token
     }
 
-    private func partialMatch(buffer: String, tag: String) -> Bool {
-        for (tagIndex, bufferIndex) in zip(tag.indices, buffer.indices) {
-            if buffer[bufferIndex] != tag[tagIndex] {
-                return false
+    private func separateToken(
+        from buffer: inout String, separators: Set<Character>, returnLeading: Bool
+    ) -> String? {
+        guard let index = buffer.firstIndex(where: { separators.contains($0) }) else { return nil }
+
+        let token: String
+        if returnLeading {
+            token = String(buffer[..<index])
+            buffer = String(buffer[index...])
+        } else {
+            token = String(buffer[buffer.index(after: index)...])
+            buffer = String(buffer[...index])
+        }
+
+        return token
+    }
+
+    private func separateToken(
+        from buffer: inout String, separatorRange: Range<String.Index>, returnLeading: Bool
+    ) -> String? {
+        let token: String
+        if returnLeading {
+            token = String(buffer[..<separatorRange.lowerBound])
+            buffer = String(buffer[separatorRange.lowerBound...])
+        } else {
+            token = String(buffer[separatorRange.upperBound...])
+            buffer = String(buffer[..<separatorRange.upperBound])
+        }
+
+        return token
+    }
+
+    private func completedStartTag(in buffer: String, tags: [String]) -> String? {
+        tags.first { buffer.hasPrefix($0) }
+    }
+
+    private func partialMatch(buffer: String, tags: [String]) -> Bool {
+        tags.contains { tag in
+            for (tagIndex, bufferIndex) in zip(tag.indices, buffer.indices) {
+                if buffer[bufferIndex] != tag[tagIndex] {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    private func firstRange(of tags: [String], in text: String) -> Range<String.Index>? {
+        tags
+            .compactMap { text.range(of: $0) }
+            .min { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
+    }
+
+    private func trailingPartialStartTagRange(in text: String, tags: [String]) -> Range<String.Index>? {
+        guard !text.isEmpty else { return nil }
+
+        for index in text.indices {
+            let suffix = String(text[index...])
+            guard !suffix.isEmpty else { continue }
+            if tags.contains(where: { $0.hasPrefix(suffix) && suffix.count < $0.count }) {
+                return index..<text.endIndex
             }
         }
 
-        return true
+        return nil
     }
 }
 

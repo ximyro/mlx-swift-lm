@@ -309,6 +309,24 @@ enum Qwen35Language {
         return (qOut, kOut)
     }
 
+    final class MathRMSNorm: Module, UnaryLayer {
+        @ParameterInfo(key: "weight") var weight: MLXArray
+        let eps: Float
+        init(dimensions: Int, eps: Float = 1e-6) {
+            self.eps = eps
+            _weight.wrappedValue = MLXArray.ones([dimensions])
+            super.init()
+        }
+        func callAsFunction(_ hiddenStates: MLXArray) -> MLXArray {
+            let isCPU = Device.defaultDevice().deviceType == .cpu
+            if isCPU {
+                let variance = mean(square(hiddenStates), axis: -1, keepDims: true)
+                return (hiddenStates * rsqrt(variance + eps)) * weight
+            }
+            return MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
+        }
+    }
+
     final class RMSNormGated: Module {
         @ParameterInfo(key: "weight") var weight: MLXArray
         let eps: Float
@@ -320,7 +338,14 @@ enum Qwen35Language {
         }
 
         func callAsFunction(_ hiddenStates: MLXArray, gate: MLXArray? = nil) -> MLXArray {
-            var x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
+            var x: MLXArray
+            let isCPU = Device.defaultDevice().deviceType == .cpu
+            if isCPU {
+                let variance = mean(square(hiddenStates), axis: -1, keepDims: true)
+                x = (hiddenStates * rsqrt(variance + eps)) * weight
+            } else {
+                x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
+            }
             if let gate {
                 x = x * silu(gate)
             }
@@ -339,8 +364,8 @@ enum Qwen35Language {
         @ModuleInfo(key: "v_proj") var vProj: Linear
         @ModuleInfo(key: "o_proj") var oProj: Linear
 
-        @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
-        @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+        @ModuleInfo(key: "q_norm") var qNorm: MathRMSNorm
+        @ModuleInfo(key: "k_norm") var kNorm: MathRMSNorm
 
         let rotaryEmbedding: RotaryEmbedding
 
@@ -359,8 +384,8 @@ enum Qwen35Language {
             _oProj.wrappedValue = Linear(
                 numAttentionHeads * headDim, args.hiddenSize, bias: args.attentionBias)
 
-            _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
-            _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
+            _qNorm.wrappedValue = MathRMSNorm(dimensions: headDim, eps: args.rmsNormEps)
+            _kNorm.wrappedValue = MathRMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
             let mrope = args.ropeParameters?["mrope_section"]?.asInts() ?? [11, 11, 10]
             let rotaryDim = Int(Float(headDim) * args.partialRotaryFactor)
@@ -637,8 +662,8 @@ enum Qwen35Language {
         @ModuleInfo(key: "self_attn") var selfAttn: Attention?
         @ModuleInfo(key: "linear_attn") var linearAttn: GatedDeltaNet?
 
-        @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
-        @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
+        @ModuleInfo(key: "input_layernorm") var inputLayerNorm: MathRMSNorm
+        @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: MathRMSNorm
 
         @ModuleInfo(key: "mlp") var mlp: Module
 
@@ -658,9 +683,9 @@ enum Qwen35Language {
                     dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
             }
 
-            _inputLayerNorm.wrappedValue = RMSNorm(
+            _inputLayerNorm.wrappedValue = MathRMSNorm(
                 dimensions: args.hiddenSize, eps: args.rmsNormEps)
-            _postAttentionLayerNorm.wrappedValue = RMSNorm(
+            _postAttentionLayerNorm.wrappedValue = MathRMSNorm(
                 dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
             super.init()
@@ -686,13 +711,20 @@ enum Qwen35Language {
         }
     }
 
-    final class Model: Module {
+    final class Model: Module, LayerPartitionable, StreamableMoE {
         @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
         @ModuleInfo(key: "layers") fileprivate var layers: [DecoderLayer]
-        @ModuleInfo(key: "norm") var norm: RMSNorm
+        @ModuleInfo(key: "norm") var norm: MathRMSNorm
 
         let ssmIdx: Int
         let faIdx: Int
+
+        // LayerPartitionable
+        public var gpuLayerCount: Int?
+        public var totalLayerCount: Int { layers.count }
+
+        // StreamableMoE
+        public var streamExperts: Bool = false
 
         init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
@@ -701,7 +733,7 @@ enum Qwen35Language {
             _layers.wrappedValue = (0 ..< args.hiddenLayers).map {
                 DecoderLayer(args, layerIdx: $0)
             }
-            _norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+            _norm.wrappedValue = MathRMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
             self.ssmIdx = 0
             self.faIdx = args.fullAttentionInterval - 1
@@ -738,13 +770,15 @@ enum Qwen35Language {
 
             for (index, layer) in layers.enumerated() {
                 let layerSSMMask = layer.isLinear ? ssmMask : nil
-                hiddenStates = layer(
-                    hiddenStates,
-                    attentionMask: faMask,
-                    ssmMask: layerSSMMask,
-                    cache: cacheArray?[index],
-                    positionIds: positionIds
-                )
+                hiddenStates = partitionedLayerCall(index: index, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
+                    layer(
+                        hiddenStates,
+                        attentionMask: faMask,
+                        ssmMask: layerSSMMask,
+                        cache: cacheArray?[index],
+                        positionIds: positionIds
+                    )
+                }
             }
 
             return norm(hiddenStates)
@@ -1068,7 +1102,10 @@ public class Qwen35: Module, VLMModel {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var weights = weights.filter { !$0.key.contains("mtp.") }
+        var weights = weights
+        if !MTPConfig.retainMTPWeights {
+            weights = weights.filter { !$0.key.contains("mtp.") }
+        }
 
         if config.textConfiguration.tieWordEmbeddings {
             weights["lm_head.weight"] = nil

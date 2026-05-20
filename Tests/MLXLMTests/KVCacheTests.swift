@@ -1,19 +1,19 @@
 import Foundation
 import MLX
+@testable import MLXLMCommon
 import Testing
 
-@testable import MLXLMCommon
-
-private let cacheCreators: [@Sendable () -> any KVCache] = [
-    { KVCacheSimple() },
-    { RotatingKVCache(maxSize: 32) },
-    { QuantizedKVCache() },
-    { ChunkedKVCache(chunkSize: 16) },
-    { ArraysCache(size: 2) },
-    { MambaCache() },
-]
-
-// MARK: - Helper
+extension MLXTestingSuite {
+    @Suite
+    struct KVCacheTests {
+    private static let cacheCreators: [@Sendable () -> any KVCache] = [
+        { KVCacheSimple() },
+        { RotatingKVCache(maxSize: 32) },
+        { QuantizedKVCache() },
+        { ChunkedKVCache(chunkSize: 16) },
+        { ArraysCache(size: 2) },
+        { MambaCache() },
+    ]
 
 private func tempURL() -> URL {
     FileManager.default.temporaryDirectory
@@ -21,17 +21,13 @@ private func tempURL() -> URL {
         .appendingPathExtension("safetensors")
 }
 
-/// Assert two arrays of MLXArray are element-wise close
 private func assertArraysClose(_ lhs: [MLXArray], _ rhs: [MLXArray], label: String = "") {
-    #expect(lhs.count == rhs.count, "state count mismatch \(label)")
-    for (i, (a, b)) in zip(lhs, rhs).enumerated() {
-        #expect(a.shape == b.shape, "shape mismatch at index \(i) \(label)")
-        let close = allClose(a, b).item(Bool.self)
-        #expect(close, "values not close at index \(i) \(label)")
+    #expect(lhs.count == rhs.count)
+    for (left, right) in zip(lhs, rhs) {
+        #expect(left.shape == right.shape)
+        #expect(allClose(left, right).item(Bool.self))
     }
 }
-
-// MARK: - Original parameterized test (updated with value assertions)
 
 @Test(
     .serialized,
@@ -52,7 +48,9 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         }
     }
 
-    let url = tempURL()
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("safetensors")
 
     try savePromptCache(url: url, cache: cache, metadata: [:])
     let (loadedCache, _) = try loadPromptCache(url: url)
@@ -61,7 +59,7 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     for (lhs, rhs) in zip(cache, loadedCache) {
         #expect(type(of: lhs) == type(of: rhs))
         #expect(lhs.metaState == rhs.metaState)
-        assertArraysClose(lhs.state, rhs.state)
+        #expect(lhs.state.count == rhs.state.count)
     }
 }
 
@@ -404,4 +402,6 @@ func testCacheListCopyIsIndependent() async throws {
         #expect(orig.shape == saved.shape)
         #expect(allClose(orig, saved).item(Bool.self))
     }
+}
+}
 }

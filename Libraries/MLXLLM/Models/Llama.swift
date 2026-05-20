@@ -119,12 +119,16 @@ class LlamaTransformerBlock: Module {
     }
 }
 
-public class LlamaModelInner: Module {
+public class LlamaModelInner: Module, LayerPartitionable {
 
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
 
     let layers: [LlamaTransformerBlock]
     let norm: RMSNorm
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
 
     init(_ args: LlamaConfiguration) {
         precondition(args.vocabularySize > 0)
@@ -142,10 +146,33 @@ public class LlamaModelInner: Module {
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: cache?[i])
+            }
         }
 
         return norm(h)
+    }
+
+    public func callCapturing(
+        _ inputs: MLXArray, cache: [KVCache?]? = nil, captureLayerIDs: Set<Int>
+    ) -> (MLXArray, [Int: MLXArray]) {
+        var h = embedTokens(inputs)
+        let kvCache: [KVCache?] = {
+            guard let c = cache else { return Array(repeating: nil, count: layers.count) }
+            var normalized: [KVCache?] = Array(repeating: nil, count: layers.count)
+            for (i, v) in c.prefix(layers.count).enumerated() { normalized[i] = v }
+            return normalized
+        }()
+        let mask = createAttentionMask(h: h, cache: kvCache.first ?? nil)
+        var captured: [Int: MLXArray] = [:]
+        for (i, layer) in layers.enumerated() {
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: kvCache[i])
+            }
+            if captureLayerIDs.contains(i) { captured[i] = h }
+        }
+        return (norm(h), captured)
     }
 }
 
@@ -157,7 +184,7 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public let model: LlamaModelInner
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+    @ModuleInfo(key: "lm_head") public var lmHead: Linear?
 
     public init(_ args: LlamaConfiguration) {
         self.vocabularySize = args.vocabularySize

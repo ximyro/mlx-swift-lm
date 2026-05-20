@@ -128,10 +128,7 @@ public struct EmbedderModelContext {
 ///     progressHandler: logProgress(modelId)
 /// )
 /// ```
-public final class EmbedderModelFactory: GenericModelFactory {
-
-    public typealias ContextType = EmbedderModelContext
-    public typealias ContainerType = EmbedderModelContainer
+public final class EmbedderModelFactory: @unchecked Sendable {
 
     public init(
         typeRegistry: ModelTypeRegistry<EmbeddingModel>,
@@ -217,5 +214,19 @@ public final class EmbedderModelFactory: GenericModelFactory {
 
     public func _wrap(_ context: EmbedderModelContext) -> EmbedderModelContainer {
         .init(context: context)
+    }
+
+    public func loadContainer(
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration,
+        useLatest: Bool = false,
+        progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
+    ) async throws -> EmbedderModelContainer {
+        let resolved = try await resolve(
+            configuration: configuration, from: downloader,
+            useLatest: useLatest, progressHandler: progressHandler)
+        let context = try await _load(configuration: resolved, tokenizerLoader: tokenizerLoader)
+        return _wrap(context)
     }
 }

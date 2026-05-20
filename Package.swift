@@ -36,7 +36,9 @@ let package = Package(
             targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
+        // SharpAI/mlx-swift adds custom Metal ops used by TurboKV compression and SSD streaming.
+        // In this workspace the dependency is checked out next to mlx-swift-lm.
+        .package(path: "../mlx-swift"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -56,6 +58,7 @@ let package = Package(
         .target(
             name: "MLXVLM",
             dependencies: [
+                "MLXLLM",
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -123,6 +126,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "MLXHuggingFace",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

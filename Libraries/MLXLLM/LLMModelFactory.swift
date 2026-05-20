@@ -33,6 +33,10 @@ public enum LLMTypeRegistry {
         "gemma3n": create(Gemma3nTextConfiguration.self, Gemma3nTextModel.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
+        "gemma4_assistant": { data in
+            let fullConfig = try JSONDecoder.json5().decode(Gemma4Configuration.self, from: data)
+            return Gemma4AssistantModel(fullConfig)
+        },
         "qwen2": create(Qwen2Configuration.self, Qwen2Model.init),
         "qwen3": create(Qwen3Configuration.self, Qwen3Model.init),
         "qwen3_moe": create(Qwen3MoEConfiguration.self, Qwen3MoEModel.init),
@@ -46,6 +50,7 @@ public enum LLMTypeRegistry {
         "openelm": create(OpenElmConfiguration.self, OpenELMModel.init),
         "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
         "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
+        "deepseek_v4": create(DeepseekV4Configuration.self, DeepseekV4Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
@@ -74,7 +79,28 @@ public enum LLMTypeRegistry {
         "nemotron_h": create(NemotronHConfiguration.self, NemotronHModel.init),
         "afmoe": create(AfMoEConfiguration.self, AfMoEModel.init),
         "jamba": create(JambaConfiguration.self, JambaModel.init),
-        "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
+        "jamba_3b": create(JambaConfiguration.self, JambaModel.init),
+        // "mistral3" is the outer model_type for two distinct text architectures:
+        //   • text_config.model_type == "ministral3"  →  dense 8B (Mistral3TextModel)
+        //   • text_config.model_type == "mistral4"    →  119B MoE + MLA (Mistral4Model)
+        "mistral3": { data in
+            struct InnerType: Decodable {
+                struct TextConfig: Decodable {
+                    let modelType: String?
+                    enum CodingKeys: String, CodingKey { case modelType = "model_type" }
+                }
+                let textConfig: TextConfig?
+                enum CodingKeys: String, CodingKey { case textConfig = "text_config" }
+            }
+            let probe = try JSONDecoder().decode(InnerType.self, from: data)
+            if probe.textConfig?.modelType == "mistral4" {
+                let config = try JSONDecoder.json5().decode(Mistral4Configuration.self, from: data)
+                return Mistral4Model(config)
+            } else {
+                let config = try JSONDecoder.json5().decode(Mistral3TextConfiguration.self, from: data)
+                return Mistral3TextModel(config)
+            }
+        },
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
     ])
 }
@@ -188,13 +214,29 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma4_e4b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let gemma4_e2b_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
+    )
+
+    static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-26b-a4b-it-4bit",
+        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
+    )
+
+    static public let gemma4_31B_it_4bit = ModelConfiguration(
+        id: "mlx-community/gemma-4-31b-it-4bit",
+        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        extraEOSTokens: ["<turn|>", "<pad>"],
+        eosTokenIds: [0]
     )
 
     static public let qwen205b4bit = ModelConfiguration(
@@ -390,6 +432,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3n_E2B_it_lm_4bit,
             gemma4_e4b_it_4bit,
             gemma4_e2b_it_4bit,
+            gemma4_26BA4B_it_4bit,
+            gemma4_31B_it_4bit,
             granite3_3_2b_4bit,
             granite_4_0_h_tiny_4bit_dwq,
             llama3_1_8B_4bit,
@@ -484,10 +528,7 @@ private struct LLMUserInputProcessor: UserInputProcessor {
 /// let modelContainer = try await LLMModelFactory.shared.loadContainer(
 ///     configuration: LLMRegistry.llama3_8B_4bit)
 /// ```
-public final class LLMModelFactory: GenericModelFactory {
-
-    public typealias ContextType = ModelContext
-    public typealias ContainerType = ModelContainer
+public final class LLMModelFactory: ModelFactory {
 
     public init(
         typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry
@@ -551,6 +592,7 @@ public final class LLMModelFactory: GenericModelFactory {
 
         // Build a ModelConfiguration with loaded EOS token IDs and tool call format
         var mutableConfiguration = configuration
+        eosTokenIds.formUnion(configuration.eosTokenIds)
         mutableConfiguration.eosTokenIds = eosTokenIds
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
@@ -563,7 +605,8 @@ public final class LLMModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            lazyLoad: configuration.lazyLoad)
 
         let tokenizer = try await tokenizerTask
 
