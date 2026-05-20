@@ -187,10 +187,19 @@ class Qwen3MoeDecoderLayer: Module {
     }
 }
 
-public class Qwen3MoEModelInner: Module {
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+public class Qwen3MoEModelInner: Module, LayerPartitionable, StreamableMoE {
 
-    fileprivate let layers: [Qwen3MoeDecoderLayer]
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
+    
+    // StreamableMoE
+    public var streamExperts: Bool = false
+    
+    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
+
+    let layers: [Qwen3MoeDecoderLayer]
     let norm: RMSNorm
     let args: Qwen3MoEConfiguration
 
@@ -214,10 +223,33 @@ public class Qwen3MoEModelInner: Module {
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
+                layer(h, mask: mask, cache: cache?[i])
+            }
         }
 
         return norm(h)
+    }
+
+    public func callCapturing(
+        _ inputs: MLXArray, cache: [KVCache?]? = nil, captureLayerIDs: Set<Int>
+    ) -> (MLXArray, [Int: MLXArray]) {
+        var h = embedTokens(inputs)
+        let kvCache: [KVCache?] = {
+            guard let c = cache else { return Array(repeating: nil, count: layers.count) }
+            var normalized: [KVCache?] = Array(repeating: nil, count: layers.count)
+            for (i, v) in c.prefix(layers.count).enumerated() { normalized[i] = v }
+            return normalized
+        }()
+        let mask = createAttentionMask(h: h, cache: kvCache.first ?? nil)
+        var captured: [Int: MLXArray] = [:]
+        for (i, layer) in layers.enumerated() {
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts) {
+                layer(h, mask: mask, cache: kvCache[i])
+            }
+            if captureLayerIDs.contains(i) { captured[i] = h }
+        }
+        return (norm(h), captured)
     }
 }
 
@@ -228,7 +260,7 @@ public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let model: Qwen3MoEModelInner
     let configuration: Qwen3MoEConfiguration
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+    @ModuleInfo(key: "lm_head") public var lmHead: Linear?
 
     public init(_ args: Qwen3MoEConfiguration) {
         self.configuration = args

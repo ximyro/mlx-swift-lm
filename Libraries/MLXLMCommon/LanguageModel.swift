@@ -61,6 +61,7 @@ public struct LMInput {
     public let text: Text
     public let image: ProcessedImage?
     public let video: ProcessedVideo?
+    public let audio: ProcessedAudio?
 
     /// Representation of tokenized input text.
     public struct Text {
@@ -120,17 +121,35 @@ public struct LMInput {
         }
     }
 
+    /// Representation of prepared input audio.
+    public struct ProcessedAudio {
+        public let features: MLXArray
+        public let mask: MLXArray?
+        public let seqLengths: [Int]?
+
+        public init(
+            features: MLXArray, mask: MLXArray? = nil, seqLengths: [Int]? = nil
+        ) {
+            self.features = features
+            self.mask = mask
+            self.seqLengths = seqLengths
+        }
+    }
+
     public init(tokens: MLXArray, mask: MLXArray? = nil) {
         self.init(text: .init(tokens: tokens, mask: mask))
     }
 
     public init(
-        text: LMInput.Text, image: LMInput.ProcessedImage? = nil,
-        video: LMInput.ProcessedVideo? = nil
+        text: Text,
+        image: ProcessedImage? = nil,
+        video: ProcessedVideo? = nil,
+        audio: ProcessedAudio? = nil
     ) {
         self.text = text
         self.image = image
         self.video = video
+        self.audio = audio
     }
 }
 
@@ -229,5 +248,48 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         } else {
             return (0 ..< numLayers).map { _ in KVCacheSimple() }
         }
+    }
+}
+
+/// Interface for Language Models that support Multi-Token Prediction (MTP) for speculative decoding.
+public protocol MTPLanguageModel: LanguageModel {
+    /// Returns logits from the model's main trunk **and** each MTP head in a single pass.
+    ///
+    /// - Parameters:
+    ///   - inputs: Token input IDs  [B, S]
+    ///   - cache: Main model KV cache (one entry per main layer)
+    ///   - mtpCaches: Per-depth MTP head KV caches (one `[KVCache]` per MTP head).
+    ///     **Persisted across speculation rounds** to prevent recursive depth collapse
+    ///     (the key insight from the MTPLX analysis: vLLM persists MTP KV history;
+    ///     resetting per cycle causes acceptance to collapse from 91% → 17% at depth 5).
+    /// - Returns: `[main_logits, mtp_0_logits, mtp_1_logits, …]`
+    func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray]
+
+    /// Initialize per-depth caches for the MTP heads.
+    ///
+    /// - Parameter parameters: The generation parameters.
+    /// - Returns: An array of caches, one for each MTP depth.
+    func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]]
+}
+
+/// A protocol for MTP language models that act as independent draft models but require a reference to the main model (e.g. Gemma 4 Assistant).
+public protocol DualModelMTP: MTPLanguageModel {
+    var mainModelRef: (any BaseLanguageModel)? { get set }
+}
+
+extension MTPLanguageModel {
+    /// Default: call the two-argument overload with no MTP caches.
+    /// Models that don't override `makeMTPCaches` get a zero-element array.
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+        callMTP(inputs, cache: cache)
+    }
+
+    /// Shim for backward compat — calls the three-argument form with nil mtpCaches.
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?) -> [MLXArray] {
+        callMTP(inputs, cache: cache, mtpCaches: nil)
+    }
+
+    public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
+        return []  // Default: no persistent MTP caches
     }
 }

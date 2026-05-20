@@ -34,6 +34,11 @@ public protocol ToolCallParser: Sendable {
     func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall]
 }
 
+public protocol TaggedToolCallParser: ToolCallParser {
+    var startTags: [String] { get }
+    func endTags(forStartTag startTag: String) -> [String]
+}
+
 extension ToolCallParser {
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
@@ -74,6 +79,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
     case xmlFunction = "xml_function"
 
+    /// Qwen family format accepting JSON, bracket, and XML function tool calls.
+    /// Examples: `<tool_call>{"name":"f","arguments":{}}</tool_call>`,
+    /// `[Calling tool: f({"x": 1})]`, `<function=f><parameter=x>1</parameter></function>`
+    case qwen
+
     /// GLM4 format with arg_key/arg_value tags.
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
     case glm4
@@ -82,9 +92,17 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `call:name{key:value,k:<escape>str<escape>}`
     case gemma
 
+    /// Gemma 4 function call format.
+    /// Example: `<|tool_call>call:name{key:<|"|>value<|"|>}<tool_call|>`
+    case gemma4
+
     /// Kimi K2 format with functions prefix.
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
     case kimiK2 = "kimi_k2"
+
+    /// DeepSeek V3/R1 format with unicode tool markers and fenced JSON.
+    /// Example: `<｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json\n{...}\n```<｜tool▁call▁end｜>`
+    case deepseek
 
     /// MiniMax M2 format with invoke/parameter tags.
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
@@ -97,6 +115,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Llama 3 inline JSON format.
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
+
+    /// GPT-OSS Harmony format.
+    /// Example: `<|channel|>commentary to=functions.func <|constrain|>json<|message|>{...}<|call|>`
+    case harmony
 
     // MARK: - Factory Methods
 
@@ -111,18 +133,26 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
                 startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
             return XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        case .qwen:
+            return QwenToolCallParser()
         case .glm4:
             return GLM4ToolCallParser()
         case .gemma:
             return GemmaFunctionParser()
+        case .gemma4:
+            return Gemma4FunctionParser()
         case .kimiK2:
             return KimiK2ToolCallParser()
+        case .deepseek:
+            return DeepSeekToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .harmony:
+            return HarmonyToolCallParser()
         }
     }
 
@@ -165,13 +195,20 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .lfm2
         }
 
+        // GPT-OSS uses OpenAI Harmony channels for reasoning, final answers, and tool calls.
+        if type == "gpt_oss" || type.hasPrefix("gpt_oss") {
+            return .harmony
+        }
+
         // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
         if type.hasPrefix("glm4") {
             return .glm4
         }
 
-        // Gemma
-        if type == "gemma" {
+        // Gemma / Gemma 4
+        if type.hasPrefix("gemma4") {
+            return .gemma4
+        } else if type.hasPrefix("gemma") {
             return .gemma
         }
 
@@ -180,19 +217,25 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .xmlFunction
         }
 
-        // Qwen3.5 family (qwen3_5, qwen3_5_moe, etc.)
-        if type.hasPrefix("qwen3_5") {
-            return .xmlFunction
+        // Qwen family. QwenToolCallParser is a superset of the existing XML
+        // function parser and also handles JSON and bracket forms.
+        if type.hasPrefix("qwen") {
+            return .qwen
         }
 
-        // Qwen3-Next family (qwen3_next, etc.)
-        if type.hasPrefix("qwen3_next") {
-            return .xmlFunction
+        // DeepSeek family (deepseek_v3, deepseek_r1, etc.)
+        if type.hasPrefix("deepseek") {
+            return .deepseek
         }
 
         // Mistral3 family (mistral3, mistral3_text, etc.)
         if type.hasPrefix("mistral3") {
             return .mistral
+        }
+
+        // Kimi/Moonshot family.
+        if type.hasPrefix("kimi") || type.hasPrefix("moonshot") {
+            return .kimiK2
         }
 
         return nil

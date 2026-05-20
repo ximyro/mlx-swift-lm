@@ -11,7 +11,13 @@ import Foundation
 func asSendable(_ value: Any) -> any Sendable {
     switch value {
     case let s as String: return s
-    case let n as NSNumber: return n
+    case let n as NSNumber:
+        if CFGetTypeID(n) == CFBooleanGetTypeID() {
+            return n.boolValue
+        }
+        let doubleValue = n.doubleValue
+        let intValue = n.intValue
+        return doubleValue == Double(intValue) ? intValue : doubleValue
     case let a as [Any]: return a.map(asSendable)
     case let d as [String: Any]: return d.mapValues(asSendable)
     case let null as NSNull: return null
@@ -21,7 +27,8 @@ func asSendable(_ value: Any) -> any Sendable {
 
 /// Deserialize JSON data, returning a Sendable value.
 func deserializeJSON(_ data: Data) -> (any Sendable)? {
-    guard let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+    guard let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    else { return nil }
     return asSendable(object)
 }
 

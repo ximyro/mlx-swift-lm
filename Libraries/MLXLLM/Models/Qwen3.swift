@@ -140,10 +140,15 @@ class Qwen3TransformerBlock: Module {
     }
 }
 
-public class Qwen3ModelInner: Module {
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+public class Qwen3ModelInner: Module, LayerPartitionable {
 
-    fileprivate let layers: [Qwen3TransformerBlock]
+
+    // LayerPartitionable
+    public var gpuLayerCount: Int?
+    public var totalLayerCount: Int { layers.count }
+    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
+
+    let layers: [Qwen3TransformerBlock]
     let norm: RMSNorm
 
     public init(_ args: Qwen3Configuration) {
@@ -165,10 +170,33 @@ public class Qwen3ModelInner: Module {
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: cache?[i])
+            }
         }
 
         return norm(h)
+    }
+
+    public func callCapturing(
+        _ inputs: MLXArray, cache: [KVCache?]? = nil, captureLayerIDs: Set<Int>
+    ) -> (MLXArray, [Int: MLXArray]) {
+        var h = embedTokens(inputs)
+        let kvCache: [KVCache?] = {
+            guard let c = cache else { return Array(repeating: nil, count: layers.count) }
+            var normalized: [KVCache?] = Array(repeating: nil, count: layers.count)
+            for (i, v) in c.prefix(layers.count).enumerated() { normalized[i] = v }
+            return normalized
+        }()
+        let mask = createAttentionMask(h: h, cache: kvCache.first ?? nil)
+        var captured: [Int: MLXArray] = [:]
+        for (i, layer) in layers.enumerated() {
+            h = partitionedLayerCall(index: i, gpuLayerCount: gpuLayerCount) {
+                layer(h, mask: mask, cache: kvCache[i])
+            }
+            if captureLayerIDs.contains(i) { captured[i] = h }
+        }
+        return (norm(h), captured)
     }
 }
 
@@ -179,7 +207,7 @@ public class Qwen3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let model: Qwen3ModelInner
     let configuration: Qwen3Configuration
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+    @ModuleInfo(key: "lm_head") public var lmHead: Linear?
 
     public init(_ args: Qwen3Configuration) {
         self.configuration = args
