@@ -34,6 +34,11 @@ public protocol ToolCallParser: Sendable {
     func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall]
 }
 
+public protocol TaggedToolCallParser: ToolCallParser {
+    var startTags: [String] { get }
+    func endTags(forStartTag startTag: String) -> [String]
+}
+
 extension ToolCallParser {
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
@@ -95,6 +100,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `functions.name:0<|tool_call_argument_begin|>{"key": "value"}`
     case kimiK2 = "kimi_k2"
 
+    /// DeepSeek V3/R1 format with unicode tool markers and fenced JSON.
+    /// Example: `<｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json\n{...}\n```<｜tool▁call▁end｜>`
+    case deepseek
+
     /// MiniMax M2 format with invoke/parameter tags.
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
@@ -106,6 +115,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Llama 3 inline JSON format.
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
+
+    /// GPT-OSS Harmony format.
+    /// Example: `<|channel|>commentary to=functions.func <|constrain|>json<|message|>{...}<|call|>`
+    case harmony
 
     // MARK: - Factory Methods
 
@@ -130,12 +143,16 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return Gemma4FunctionParser()
         case .kimiK2:
             return KimiK2ToolCallParser()
+        case .deepseek:
+            return DeepSeekToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .harmony:
+            return HarmonyToolCallParser()
         }
     }
 
@@ -178,6 +195,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .lfm2
         }
 
+        // GPT-OSS uses OpenAI Harmony channels for reasoning, final answers, and tool calls.
+        if type == "gpt_oss" || type.hasPrefix("gpt_oss") {
+            return .harmony
+        }
+
         // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
         if type.hasPrefix("glm4") {
             return .glm4
@@ -201,9 +223,19 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .qwen
         }
 
+        // DeepSeek family (deepseek_v3, deepseek_r1, etc.)
+        if type.hasPrefix("deepseek") {
+            return .deepseek
+        }
+
         // Mistral3 family (mistral3, mistral3_text, etc.)
         if type.hasPrefix("mistral3") {
             return .mistral
+        }
+
+        // Kimi/Moonshot family.
+        if type.hasPrefix("kimi") || type.hasPrefix("moonshot") {
+            return .kimiK2
         }
 
         return nil

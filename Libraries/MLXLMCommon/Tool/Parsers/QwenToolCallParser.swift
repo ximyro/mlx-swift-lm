@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Qwen checkpoints in the wild may emit OpenAI-style JSON wrappers,
 /// bracket calls, or Qwen3.5/Qwen-Coder XML function calls.
-public struct QwenToolCallParser: ToolCallParser, Sendable {
+public struct QwenToolCallParser: TaggedToolCallParser, Sendable {
     public let startTag: String? = "<tool_call>"
     public let endTag: String? = "</tool_call>"
 

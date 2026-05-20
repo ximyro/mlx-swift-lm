@@ -67,8 +67,8 @@ public class ToolCallProcessor {
     }
 
     private var startTags: [String] {
-        if let qwenParser = parser as? QwenToolCallParser {
-            return qwenParser.startTags
+        if let taggedParser = parser as? any TaggedToolCallParser {
+            return taggedParser.startTags
         }
         return parser.startTag.map { [$0] } ?? []
     }
@@ -78,8 +78,8 @@ public class ToolCallProcessor {
     }
 
     private func endTags(for startTag: String) -> [String] {
-        if let qwenParser = parser as? QwenToolCallParser {
-            return qwenParser.endTags(forStartTag: startTag)
+        if let taggedParser = parser as? any TaggedToolCallParser {
+            return taggedParser.endTags(forStartTag: startTag)
         }
         return parser.endTag.map { [$0] } ?? []
     }
@@ -257,10 +257,7 @@ public class ToolCallProcessor {
                 let trailingToken = separateToken(
                     from: &toolCallBuffer, separatorRange: endRange, returnLeading: false)
 
-                // Parse the tool call using the parser
-                if let toolCall = parser.parse(content: toolCallBuffer, tools: tools) {
-                    toolCalls.append(toolCall)
-                }
+                toolCalls.append(contentsOf: parser.parseEOS(toolCallBuffer, tools: tools))
 
                 state = .normal
                 activeEndTags = []

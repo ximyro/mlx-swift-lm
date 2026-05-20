@@ -572,6 +572,181 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("swift"))
     }
 
+    @Test("Test Kimi K2 Parser - vllm-mlx Wrapped Format")
+    func testKimiK2ParserVLLMMLXWrappedFormat() throws {
+        let parser = KimiK2ToolCallParser()
+        let content = """
+            <|tool_calls_section_begin|>
+            <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"city": "Beijing"}<|tool_call_end|>
+            <|tool_calls_section_end|>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["city"] == .string("Beijing"))
+    }
+
+    @Test("Test Kimi K2 Parser - Singular Section Variant")
+    func testKimiK2ParserSingularSectionVariant() throws {
+        let parser = KimiK2ToolCallParser()
+        let content =
+            "<|tool_call_section_begin|><|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{\"query\":\"swift\"}<|tool_call_end|><|tool_call_section_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
+    @Test("Test Kimi K2 Parser - Bare Tool Call")
+    func testKimiK2ParserBareToolCall() throws {
+        let parser = KimiK2ToolCallParser()
+        let content = "<|tool_call_begin|>search:0<|tool_call_argument_begin|>{}<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test Kimi K2 Parser - Prefixed Function Name")
+    func testKimiK2ParserPrefixedFunctionName() throws {
+        let parser = KimiK2ToolCallParser()
+        let content = "<|tool_call_begin|>tools.search:0<|tool_call_argument_begin|>{\"limit\":3}<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["limit"] == .int(3))
+    }
+
+    @Test("Test Kimi K2 Parser - Multiple Tool Calls")
+    func testKimiK2ParserMultipleToolCalls() throws {
+        let parser = KimiK2ToolCallParser()
+        let content = """
+            <|tool_calls_section_begin|>
+            <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{"query":"swift"}<|tool_call_end|>
+            <|tool_call_begin|>functions.read_file:1<|tool_call_argument_begin|>{"path":"/tmp/a.swift"}<|tool_call_end|>
+            <|tool_calls_section_end|>
+            """
+
+        let toolCalls = parser.parseEOS(content, tools: nil)
+
+        #expect(toolCalls.count == 2)
+        #expect(toolCalls[0].function.name == "search")
+        #expect(toolCalls[0].function.arguments["query"] == .string("swift"))
+        #expect(toolCalls[1].function.name == "read_file")
+        #expect(toolCalls[1].function.arguments["path"] == .string("/tmp/a.swift"))
+    }
+
+    @Test("Test Kimi K2 Format via ToolCallProcessor - Split Chunks")
+    func testKimiK2FormatProcessorSplitChunks() throws {
+        let processor = ToolCallProcessor(format: .kimiK2)
+        let chunks = [
+            "Before <|tool_calls_section",
+            "_begin|>\n<|tool_call_begin|>functions.search:0",
+            "<|tool_call_argument_begin|>{\"query\":\"swift\"}",
+            "<|tool_call_end|>\n<|tool_calls_section_end|> after",
+        ]
+
+        var output = ""
+        for chunk in chunks {
+            output += processor.processChunk(chunk) ?? ""
+        }
+
+        #expect(output == "Before  after")
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
+    // MARK: - DeepSeek Format Tests
+
+    @Test("Test DeepSeek Tool Call Parser")
+    func testDeepSeekParser() throws {
+        let parser = DeepSeekToolCallParser()
+        let content = """
+            <｜tool▁calls▁begin｜>
+            <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+            ```json
+            {"city": "Paris"}
+            ```<｜tool▁call▁end｜>
+            <｜tool▁calls▁end｜>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["city"] == .string("Paris"))
+    }
+
+    @Test("Test DeepSeek Tool Call Parser - Simple Format")
+    func testDeepSeekParserSimpleFormat() throws {
+        let parser = DeepSeekToolCallParser()
+        let content = """
+            <｜tool▁calls▁begin｜>
+            <｜tool▁call▁begin｜>search
+            ```json
+            {"query": "swift"}
+            ```<｜tool▁call▁end｜>
+            <｜tool▁calls▁end｜>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
+    @Test("Test DeepSeek Tool Call Parser - Multiple Tool Calls")
+    func testDeepSeekParserMultipleToolCalls() throws {
+        let parser = DeepSeekToolCallParser()
+        let content = """
+            <｜tool▁calls▁begin｜>
+            <｜tool▁call▁begin｜>function<｜tool▁sep｜>search
+            ```json
+            {"query": "swift"}
+            ```<｜tool▁call▁end｜>
+            <｜tool▁call▁begin｜>function<｜tool▁sep｜>read_file
+            ```json
+            {"path": "/tmp/a.swift"}
+            ```<｜tool▁call▁end｜>
+            <｜tool▁calls▁end｜>
+            """
+
+        let toolCalls = parser.parseEOS(content, tools: nil)
+
+        #expect(toolCalls.count == 2)
+        #expect(toolCalls[0].function.name == "search")
+        #expect(toolCalls[0].function.arguments["query"] == .string("swift"))
+        #expect(toolCalls[1].function.name == "read_file")
+        #expect(toolCalls[1].function.arguments["path"] == .string("/tmp/a.swift"))
+    }
+
+    @Test("Test DeepSeek Format via ToolCallProcessor - Split Chunks")
+    func testDeepSeekFormatProcessorSplitChunks() throws {
+        let processor = ToolCallProcessor(format: .deepseek)
+        let chunks = [
+            "Before <｜tool▁calls",
+            "▁begin｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>search\n",
+            "```json\n{\"query\":\"swift\"}\n```",
+            "<｜tool▁call▁end｜>\n<｜tool▁calls▁end｜> after",
+        ]
+
+        var output = ""
+        for chunk in chunks {
+            output += processor.processChunk(chunk) ?? ""
+        }
+
+        #expect(output == "Before  after")
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("swift"))
+    }
+
     // MARK: - MiniMax M2 Format Tests
 
     @Test("Test MiniMax M2 Tool Call Parser")
@@ -678,6 +853,7 @@ struct ToolTests {
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
+        #expect(ToolCallFormat.deepseek.rawValue == "deepseek")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
 
@@ -725,10 +901,20 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .qwen)
         #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .qwen)
 
+        // DeepSeek models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "deepseek_v3") == .deepseek)
+        #expect(ToolCallFormat.infer(from: "deepseek_r1") == .deepseek)
+        #expect(ToolCallFormat.infer(from: "DeepSeek_V4") == .deepseek)
+
         // Mistral3 models (prefix matching)
         #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
+
+        // Kimi/Moonshot models (prefix matching)
+        #expect(ToolCallFormat.infer(from: "kimi_k25") == .kimiK2)
+        #expect(ToolCallFormat.infer(from: "kimi_linear") == .kimiK2)
+        #expect(ToolCallFormat.infer(from: "moonshot") == .kimiK2)
 
         // Llama models - require secondary signals from configData
         #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
