@@ -137,13 +137,6 @@ public class ToolCallProcessor {
         parser.startTag?.first
     }
 
-    /// Whether the selected format frames calls with `<tool_call>` tags and
-    /// therefore closes frames only after a structurally complete payload.
-    private var usesStructuralToolCallFrame: Bool {
-        parser.startTag == ToolCallFrameScanner.startTag
-            && parser.endTag == ToolCallFrameScanner.endTag
-    }
-
     // MARK: - Public Methods
 
     /// Process a generated text chunk and extract any tool call content.
@@ -758,7 +751,9 @@ public class ToolCallProcessor {
             leadingToken = scanTaggedStart(
                 startTag: startTag, startChar: startChar, leadingToken: leadingToken)
             leadingTokenWasRecorded = true
-            guard toolCallBuffer.hasPrefix(startTag) else { return leadingToken }
+            guard parser.startTags.contains(where: toolCallBuffer.hasPrefix) else {
+                return leadingToken
+            }
             state = .collectingToolCall
             enteredCollectingThisChunk = true
             fallthrough
@@ -770,7 +765,9 @@ public class ToolCallProcessor {
                 return leadingToken
             }
 
-            guard let endTag = parser.endTag else {
+            guard let activeStart = parser.startTags.first(where: toolCallBuffer.hasPrefix),
+                let endTag = parser.endTag(forStartTag: activeStart)
+            else {
                 return leadingToken
             }
 
@@ -792,10 +789,7 @@ public class ToolCallProcessor {
             // payload, so a literal close marker inside a JSON string argument
             // cannot truncate the frame and expose its suffix as new input.
             // Other dialects keep the first textual close their parsers use.
-            let frameEnd =
-                usesStructuralToolCallFrame
-                ? ToolCallFrameScanner.frameEnd(in: toolCallBuffer)
-                : toolCallBuffer.range(of: endTag).map(\.upperBound)
+            let frameEnd = parser.frameEnd(in: toolCallBuffer)
 
             if let frameEnd {
                 let bufferedToolCall = String(toolCallBuffer[..<frameEnd])
@@ -893,7 +887,7 @@ public class ToolCallProcessor {
         // A disproven opener only rules out that candidate, not the remaining chunk.
         while candidate < buffer.endIndex {
             let suffix = buffer[candidate...]
-            if suffix.hasPrefix(startTag) || startTag.hasPrefix(suffix) {
+            if parser.startTags.contains(where: { suffix.hasPrefix($0) || $0.hasPrefix(suffix) }) {
                 emitText(until: candidate)
                 toolCallBuffer = String(suffix)
                 return response.isEmpty ? nil : response
