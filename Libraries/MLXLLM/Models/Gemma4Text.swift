@@ -1131,7 +1131,9 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
         let inputLen = inputs.dim(1)
         // The assistant predicts x_{t+2} using h_t and embed(x_{t+1}).
         // x_{t+1} is the token predicted by the main model's logits at the last position.
-        let mainLogitsLast = mainLogits[0..., -1, 0...][.newAxis]  // [B, 1, V]
+        let mainLogitsLast = mainLogits[
+            0..., (mainLogits.dim(1) - 1)..<mainLogits.dim(1), 0...
+        ]  // [B, 1, V]
         let predictedToken = argMax(mainLogitsLast, axis: -1)      // [B, 1]
         let lastToken = predictedToken
         var eEmbed: MLXArray
@@ -1248,13 +1250,13 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
             // logits is [B, S, vocab]; take last position
             let lastLogits = logits[0..., logits.dim(1)-1, 0...]  // [B, vocab]
             let nextTokenScalar = argMax(lastLogits, axis: -1)  // [B]
-            // Reshape to [B, 1] for embedding
-            let nextTokenReshaped = nextTokenScalar.reshaped([1, 1])  // [1, 1] for batch=1
+            // Reshape to [B, 1] for embedding.
+            let nextTokenReshaped = nextTokenScalar.reshaped([nextTokenScalar.dim(0), 1])
             if let g4tm = mainModel as? Gemma4TextModel {
-                eEmbed = g4tm.model.embedTokens(nextTokenReshaped)  // [1, 1, 1536]
+                eEmbed = g4tm.model.embedTokens(nextTokenReshaped)  // [B, 1, 1536]
                 eEmbed = eEmbed * MLXArray(g4tm.model.embedScale, dtype: eEmbed.dtype)
             } else if let g4m = mainModel as? Gemma4Model {
-                eEmbed = g4m.languageModel.model.embedTokens(nextTokenReshaped)  // [1, 1, 1536]
+                eEmbed = g4m.languageModel.model.embedTokens(nextTokenReshaped)  // [B, 1, 1536]
                 eEmbed = eEmbed * MLXArray(g4m.languageModel.model.embedScale, dtype: eEmbed.dtype)
             } else {
                 eEmbed = model.embedTokens(nextTokenReshaped)
