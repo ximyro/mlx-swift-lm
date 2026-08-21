@@ -119,6 +119,95 @@ extension MLXTestingSuite {
             #expect(!sum.isInfinite)
         }
 
+        @Test("Qwen35 chunks a long batch-one text prefill")
+        func testTextOnlyPrepareChunksLongPrompt() throws {
+            let config = try JSONDecoder().decode(
+                Qwen35Configuration.self, from: tinyConfigData())
+            let model = Qwen35(config)
+            let cache = model.newCache(parameters: nil)
+            let tokenCount = 14_945
+            let tokenValues = (0 ..< tokenCount).map { Int32($0 % config.vocabSize) }
+            let input = LMInput(
+                tokens: MLXArray(tokenValues).reshaped(1, tokenCount),
+                mask: MLXArray.ones([1, tokenCount], dtype: .int8))
+
+            switch try model.prepare(input, cache: cache, windowSize: 2_048) {
+            case .tokens(let remainder):
+                eval(remainder.tokens)
+                #expect(remainder.tokens.shape == [609])
+                #expect(remainder.mask?.shape == [609])
+                #expect(remainder.tokens.asArray(Int32.self) == Array(tokenValues.suffix(609)))
+                #expect(cache.map(\.offset).max() == 14_336)
+            case .logits:
+                Issue.record("Expected text-only prefill to return the final token chunk")
+            }
+        }
+
+        @Test("Qwen35 uses the default text prefill size for invalid values")
+        func testTextOnlyPrepareUsesDefaultPrefillSize() throws {
+            let config = try JSONDecoder().decode(
+                Qwen35Configuration.self, from: tinyConfigData())
+            let input = LMInput(tokens: MLXArray.zeros([1, 1_024], dtype: .int32))
+
+            for windowSize in [nil, 0, -1] as [Int?] {
+                let model = Qwen35(config)
+                let cache = model.newCache(parameters: nil)
+
+                switch try model.prepare(input, cache: cache, windowSize: windowSize) {
+                case .tokens(let remainder):
+                    #expect(remainder.tokens.shape == [512])
+                    #expect(cache.map(\.offset).max() == 512)
+                case .logits:
+                    Issue.record("Expected text-only prefill to return the final token chunk")
+                }
+            }
+        }
+
+        @Test("Qwen35 cached multi-chunk prefill matches a fresh prompt")
+        func testCachedTextOnlyPreparePreservesPositions() throws {
+            let config = try JSONDecoder().decode(
+                Qwen35Configuration.self, from: tinyConfigData())
+            let model = Qwen35(config)
+            let values = (0 ..< 12).map { Int32($0 % config.vocabSize) }
+
+            let cached = model.newCache(parameters: nil)
+            let prefix = LMInput(tokens: MLXArray(Array(values.prefix(3))).reshaped(1, 3))
+            guard case .tokens(let prefixTokens) =
+                try model.prepare(prefix, cache: cached, windowSize: 4)
+            else {
+                Issue.record("Expected text-only prefix preparation to return tokens")
+                return
+            }
+            _ = model(prefixTokens.tokens[.newAxis], cache: cached)
+            eval(cached)
+
+            let suffix = LMInput(tokens: MLXArray(Array(values.suffix(9))).reshaped(1, 9))
+            guard case .tokens(let cachedRemainder) =
+                try model.prepare(suffix, cache: cached, windowSize: 4)
+            else {
+                Issue.record("Expected cached suffix preparation to return tokens")
+                return
+            }
+            let cachedLogits = model(cachedRemainder.tokens[.newAxis], cache: cached)
+            eval(cachedLogits)
+
+            let fresh = model.newCache(parameters: nil)
+            let fullPrompt = LMInput(tokens: MLXArray(values).reshaped(1, values.count))
+            guard case .tokens(let freshRemainder) =
+                try model.prepare(fullPrompt, cache: fresh, windowSize: 20)
+            else {
+                Issue.record("Expected fresh prompt preparation to return tokens")
+                return
+            }
+            let freshLogits = model(freshRemainder.tokens[.newAxis], cache: fresh)
+            eval(freshLogits)
+
+            let maxDifference = abs(
+                cachedLogits[0, -1, 0...] - freshLogits[0, -1, 0...]
+            ).max().item(Float.self)
+            #expect(maxDifference < 1e-5)
+        }
+
         @Test("Qwen35 forward pass is deterministic")
         func testDeterminism() throws {
             let config = try JSONDecoder().decode(

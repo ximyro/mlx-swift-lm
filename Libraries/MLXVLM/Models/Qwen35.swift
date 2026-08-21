@@ -940,9 +940,9 @@ enum Qwen35Language {
             super.init()
         }
 
-        func resetPositionState() {
+        func resetPositionState(cacheOffset: Int = 0) {
             precomputedPositionIds = nil
-            ropeDeltas = nil
+            ropeDeltas = cacheOffset > 0 ? MLXArray(0).asType(.int32) : nil
         }
 
         func callAsFunction(
@@ -1138,9 +1138,37 @@ public class Qwen35: Module, VLMModel {
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
-        windowSize _: Int?
+        windowSize: Int?
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
+
+        if input.image == nil && input.video == nil,
+            inputIds.ndim == 1 || (inputIds.ndim == 2 && inputIds.dim(0) == 1)
+        {
+            let prefillStepSize = windowSize.flatMap { $0 > 0 ? $0 : nil } ?? 512
+            let typedCache = castCache(cache)
+            let cacheOffset = typedCache?[languageModel.model.faIdx].offset ?? 0
+            languageModel.resetPositionState(cacheOffset: cacheOffset)
+            var y = inputIds.ndim == 2 ? input.text[0] : input.text
+
+            while y.tokens.size > prefillStepSize {
+                let chunk = y[.newAxis, ..<prefillStepSize]
+                _ = languageModel(
+                    chunk.tokens,
+                    inputsEmbeds: nil,
+                    cache: typedCache,
+                    mask: chunk.mask,
+                    positionIds: nil,
+                    pixelValues: nil,
+                    imageGridTHW: nil,
+                    videoGridTHW: nil
+                )
+                eval(cache)
+                y = y[prefillStepSize...]
+            }
+
+            return .tokens(y)
+        }
 
         var pixelValues: MLXArray?
         var imageFrames: [THW]?
