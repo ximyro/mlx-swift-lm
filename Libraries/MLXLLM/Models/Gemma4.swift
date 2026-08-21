@@ -78,10 +78,11 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
             let startsWithModel = k.hasPrefix("model.")
             k = k.replacingOccurrences(of: "model.", with: "", options: .anchored)
 
-            // Skip vision/audio weights
+            // Skip vision/audio weights (vision_embedder is the gemma4_unified
+            // checkpoints' vision tower prefix)
             if k.hasPrefix("vision_tower") || k.hasPrefix("multi_modal_projector")
                 || k.hasPrefix("audio_tower") || k.hasPrefix("embed_audio")
-                || k.hasPrefix("embed_vision")
+                || k.hasPrefix("embed_vision") || k.hasPrefix("vision_embedder")
             {
                 continue
             }

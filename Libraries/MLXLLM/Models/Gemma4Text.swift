@@ -415,8 +415,8 @@ private class Gemma4Attention: Module {
             guard let kProj = kProj, let kNorm = kNorm, let vNorm = vNorm else {
                 fatalError("Layer \(layerIdx) is a KV-shared layer but received no sharedKV")
             }
-            var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
-            k = kNorm(k)
+            let kRaw = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
+            var k = kNorm(kRaw)
             k = k.transposed(0, 2, 1, 3)
             k = gemma4ApplyRotaryPosition(rope, to: k, offset: activePositionOffset)
 
@@ -426,7 +426,12 @@ private class Gemma4Attention: Module {
                 v = vNorm(v)
                 v = v.transposed(0, 2, 1, 3)
             } else {
-                v = vNorm(k)
+                // k_eq_v: values come from the RAW k_proj output — before k_norm
+                // and before RoPE. Building them from the normed+rotated keys
+                // corrupts the values position-dependently (mild at small offsets,
+                // catastrophic past ~1k tokens).
+                v = vNorm(kRaw)
+                v = v.transposed(0, 2, 1, 3)
             }
 
             if let quantizedCache = cache as? QuantizedKVCacheProtocol {

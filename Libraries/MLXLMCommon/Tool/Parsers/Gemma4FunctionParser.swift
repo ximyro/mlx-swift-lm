@@ -231,6 +231,6 @@ public struct Gemma4FunctionParser: ToolCallParser, Sendable {
     }
 
     private func isFunctionNameCharacter(_ char: Character) -> Bool {
-        char.isLetter || char.isNumber || char == "_"
+        char.isLetter || char.isNumber || char == "_" || char == "-"
     }
 }

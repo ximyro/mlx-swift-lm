@@ -339,6 +339,175 @@ struct ToolTests {
         #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
     }
 
+    @Test("Test XML Function Parser - Missing closing parameter tag")
+    func testXMLFunctionParserMissingParameterCloser() throws {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        // Quantized models at long context sometimes drop </parameter>; the value
+        // should run to </function> instead of the argument being dropped.
+        let content = """
+            <function=read>
+            <parameter=filePath>
+            /repo/internal/app/core/usecases/calculate.go
+            </function>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "read")
+        #expect(
+            toolCall.function.arguments["filePath"]
+                == .string("/repo/internal/app/core/usecases/calculate.go"))
+    }
+
+    @Test("Test XML Function Parser - Missing closer before next parameter")
+    func testXMLFunctionParserMissingCloserBetweenParams() throws {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content = """
+            <function=get_weather>
+            <parameter=location>
+            Tokyo
+            <parameter=unit>celsius</parameter>
+            </function>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test XML Function Parser - Parameter marker in value stays text")
+    func testXMLFunctionParserParameterMarkerInValue() throws {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            #"<function=write><parameter=content>let marker = "<parameter=fake>"</parameter></function>"#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(
+            toolCall.function.arguments["content"]
+                == .string(#"let marker = "<parameter=fake>""#))
+        #expect(toolCall.function.arguments["fake"] == nil)
+    }
+
+    @Test("Test XML Function Parser - Missing closing function tag")
+    func testXMLFunctionParserMissingFunctionCloser() throws {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content = """
+            <function=read>
+            <parameter=filePath>/repo/main.go</parameter>
+            """
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "read")
+        #expect(toolCall.function.arguments["filePath"] == .string("/repo/main.go"))
+    }
+
+    @Test("Test Qwen Parser - Truncated JSON tool_call recovers name and arguments")
+    func testQwenParserTruncatedJSONToolCall() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        // Valid arguments object, but the JSON as a whole is broken (trailing
+        // garbage before the end tag).
+        _ = processor.processChunk(
+            "<tool_call>{\"name\": \"read\", \"arguments\": {\"filePath\": \"/repo/a.go\"}, \"id\": </tool_call>"
+        )
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "read")
+        #expect(toolCall.function.arguments["filePath"] == .string("/repo/a.go"))
+    }
+
+    @Test("Test Qwen Parser - Truncated arguments do not emit an empty call")
+    func testQwenParserRejectsTruncatedArguments() {
+        let processor = ToolCallProcessor(format: .qwen)
+
+        _ = processor.processChunk(
+            #"<tool_call>{"name":"send","arguments":{"to":</tool_call>"#)
+
+        #expect(processor.toolCalls.isEmpty)
+    }
+
+    @Test("Test Qwen Parser - Bare function missing closer is parsed at EOS")
+    func testQwenParserBareFunctionMissingCloser() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+
+        _ = processor.processChunk(
+            "<function=read><parameter=filePath>/repo/main.go</parameter>")
+        processor.processEOS()
+
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "read")
+        #expect(toolCall.function.arguments["filePath"] == .string("/repo/main.go"))
+    }
+
+    @Test("Test Qwen Parser - Multiple function blocks in one tool_call wrapper")
+    func testQwenParserMultipleFunctionsInOneWrapper() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let content = """
+            <tool_call>
+            <function=read>
+            <parameter=filePath>/repo/a.go</parameter>
+            </function>
+            <function=read>
+            <parameter=filePath>/repo/b.go</parameter>
+            </function>
+            </tool_call>
+            """
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 2)
+        #expect(processor.toolCalls[0].function.arguments["filePath"] == .string("/repo/a.go"))
+        #expect(processor.toolCalls[1].function.arguments["filePath"] == .string("/repo/b.go"))
+    }
+
+    @Test("Test Qwen Parser - Function marker in argument stays argument text")
+    func testQwenParserFunctionMarkerInArgument() throws {
+        let processor = ToolCallProcessor(format: .qwen)
+        let content = """
+            <tool_call>
+            <function=write>
+            <parameter=content>let marker = "<function=not-a-call>"</parameter>
+            </function>
+            </tool_call>
+            """
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "write")
+        #expect(
+            toolCall.function.arguments["content"]
+                == .string(#"let marker = "<function=not-a-call>""#))
+    }
+
+    @Test("Test Harmony Parser - Requires standalone recipient attribute")
+    func testHarmonyParserRecipientBoundary() throws {
+        let parser = HarmonyToolCallParser()
+        let valid =
+            #"<|channel|>commentary to=functions.erase <|constrain|>json<|message|>{"id":1}<|call|>"#
+        let invalid =
+            #"<|channel|>commentary not_to=functions.erase <|constrain|>json<|message|>{"id":1}<|call|>"#
+
+        let toolCall = try #require(parser.parse(content: valid, tools: nil))
+        #expect(toolCall.function.name == "erase")
+        #expect(parser.parse(content: invalid, tools: nil) == nil)
+
+        let processor = ToolCallProcessor(format: .harmony)
+        _ = processor.processChunk(
+            #"not_to=functions.erase <|constrain|>json<|message|>{"id":1}<|call|>"#)
+        #expect(processor.toolCalls.isEmpty)
+
+        let splitProcessor = ToolCallProcessor(format: .harmony)
+        #expect(splitProcessor.processChunk("not_") == "not_")
+        _ = splitProcessor.processChunk(
+            #"to=functions.erase <|constrain|>json<|message|>{"id":1}<|call|>"#)
+        #expect(splitProcessor.toolCalls.isEmpty)
+    }
+
     // MARK: - Qwen3.5 Format Tests (XML Function with tool_call wrapper)
 
     @Test("Test Qwen3.5 XML Function Parser - With tool_call Tags")

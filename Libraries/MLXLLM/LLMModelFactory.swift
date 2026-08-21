@@ -33,6 +33,12 @@ public enum LLMTypeRegistry {
         "gemma3n": create(Gemma3nTextConfiguration.self, Gemma3nTextModel.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
+        // Unified (text+vision+audio) Gemma 4 checkpoints, e.g. gemma-4-12b-*.
+        // The unified text stack is identical to gemma4 — upstream mlx-vlm's
+        // gemma4_unified.LanguageModel is re-exported from gemma4.language —
+        // so the text-only wrapper serves it; tower weights are dropped in
+        // Gemma4Model.sanitize.
+        "gemma4_unified": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_assistant": { data in
             let fullConfig = try JSONDecoder.json5().decode(Gemma4Configuration.self, from: data)
             return Gemma4AssistantModel(fullConfig)

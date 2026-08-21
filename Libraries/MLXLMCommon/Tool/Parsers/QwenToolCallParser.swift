@@ -42,10 +42,11 @@ public struct QwenToolCallParser: TaggedToolCallParser, Sendable {
         for block in toolCallBlocks {
             if let call = parseJSONToolCall(block.inner) {
                 calls.append(call)
-            } else if let call = XMLFunctionParser(
-                startTag: "<tool_call>", endTag: "</tool_call>"
-            ).parse(content: block.inner, tools: tools) {
-                calls.append(call)
+            } else {
+                // A single <tool_call> wrapper may carry several <function=>
+                // blocks (models batch calls); parse all of them, not just the
+                // first.
+                calls.append(contentsOf: parseXMLFunctionCalls(in: block.inner, tools: tools))
             }
         }
 
@@ -59,22 +60,73 @@ public struct QwenToolCallParser: TaggedToolCallParser, Sendable {
 
     private func parseJSONToolCall(_ text: String) -> ToolCall? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("{"),
-              let data = trimmed.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let name = object["name"] as? String,
-              !name.isEmpty
+        guard trimmed.hasPrefix("{") else { return nil }
+
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let name = object["name"] as? String,
+           !name.isEmpty
+        {
+            let rawArguments = object["arguments"] ?? [String: Any]()
+            let arguments: [String: any Sendable]
+            if let dict = rawArguments as? [String: Any] {
+                arguments = dict.mapValues(asSendable)
+            } else {
+                arguments = ["arguments": asSendable(rawArguments)]
+            }
+
+            return ToolCall(function: .init(name: name, arguments: arguments))
+        }
+
+        // Lenient recovery: the block looked like JSON but didn't parse as a
+        // whole (truncated tail, stray text after the object, …). Salvage the
+        // name and the balanced-brace arguments object rather than dropping
+        // the call or emitting it argument-less.
+        guard let nameKey = trimmed.range(of: #""name""#),
+              let colon = trimmed.range(of: ":", range: nameKey.upperBound ..< trimmed.endIndex),
+              let quoteOpen = trimmed.range(of: "\"", range: colon.upperBound ..< trimmed.endIndex),
+              let quoteClose = trimmed.range(
+                of: "\"", range: quoteOpen.upperBound ..< trimmed.endIndex)
         else { return nil }
 
-        let rawArguments = object["arguments"] ?? [String: Any]()
-        let arguments: [String: any Sendable]
-        if let dict = rawArguments as? [String: Any] {
+        let name = String(trimmed[quoteOpen.upperBound ..< quoteClose.lowerBound])
+        guard !name.isEmpty else { return nil }
+
+        var arguments: [String: any Sendable] = [:]
+        if let argsKey = trimmed.range(of: #""arguments""#) {
+            guard
+                let brace = trimmed.range(
+                    of: "{", range: argsKey.upperBound ..< trimmed.endIndex),
+                let close = findBalancedBrace(in: trimmed, startingAt: brace.lowerBound),
+                let data = String(trimmed[brace.lowerBound ... close]).data(using: .utf8),
+                let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { return nil }
             arguments = dict.mapValues(asSendable)
-        } else {
-            arguments = ["arguments": asSendable(rawArguments)]
         }
 
         return ToolCall(function: .init(name: name, arguments: arguments))
+    }
+
+    /// Parse every `<function=…>` block in `text`, tolerating a missing
+    /// `</function>` closer on the final block (the value then runs to the end
+    /// of the wrapper the caller already stripped).
+    private func parseXMLFunctionCalls(
+        in text: String, tools: [[String: any Sendable]]?
+    ) -> [ToolCall] {
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        var calls: [ToolCall] = []
+        var searchStart = text.startIndex
+        while let start = text.range(of: "<function=", range: searchStart ..< text.endIndex) {
+            let end = text.range(
+                of: "</function>", range: start.upperBound ..< text.endIndex)
+            let segmentEnd = end?.upperBound ?? text.endIndex
+            let segment = String(text[start.lowerBound ..< segmentEnd])
+            if let call = parser.parse(content: segment, tools: tools) {
+                calls.append(call)
+            }
+            searchStart = segmentEnd
+        }
+        return calls
     }
 
     private func parseBracketCalls(in text: String) -> [ToolCall] {
@@ -125,9 +177,7 @@ public struct QwenToolCallParser: TaggedToolCallParser, Sendable {
     private func parseBareFunctionCalls(
         in text: String, tools: [[String: any Sendable]]?
     ) -> [ToolCall] {
-        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
-        return extractDelimitedBlocks(from: text, start: "<function=", end: "</function>")
-            .compactMap { parser.parse(content: $0.fullText, tools: tools) }
+        parseXMLFunctionCalls(in: text, tools: tools)
     }
 
     private func stripThinkTags(from text: String) -> String {

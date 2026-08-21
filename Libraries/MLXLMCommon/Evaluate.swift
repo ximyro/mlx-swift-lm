@@ -2496,8 +2496,11 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler, @unchecked Sendable {
                 }
             }
 
-            // Check if we have a complete tool call.
-            if let toolCall = toolCallProcessor.toolCalls.popLast() {
+            // Check if we have complete tool calls. Drain FIFO — a single chunk
+            // can complete several calls (batched <function=> blocks in one
+            // wrapper), and popLast() would emit them in reverse order.
+            while !toolCallProcessor.toolCalls.isEmpty {
+                let toolCall = toolCallProcessor.toolCalls.removeFirst()
                 if case .terminated = emit(.toolCall(toolCall)) {
                     return false
                 }

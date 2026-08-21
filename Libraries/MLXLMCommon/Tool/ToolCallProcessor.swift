@@ -31,6 +31,7 @@ public class ToolCallProcessor {
     private var state = State.normal
     private var toolCallBuffer = ""
     private var activeEndTags: [String] = []
+    private var precedingOutputCharacter: Character?
 
     /// The tool calls extracted during processing.
     public var toolCalls: [ToolCall] = []
@@ -90,10 +91,11 @@ public class ToolCallProcessor {
     /// - Parameter chunk: The text chunk to process
     /// - Returns: Regular text that should be displayed (non-tool call content), or `nil` if buffering
     public func processChunk(_ chunk: String) -> String? {
-        if isInlineFormat {
-            return processInlineChunk(chunk)
+        let output = isInlineFormat ? processInlineChunk(chunk) : processTaggedChunk(chunk)
+        if let last = output?.last {
+            precedingOutputCharacter = last
         }
-        return processTaggedChunk(chunk)
+        return output
     }
 
     /// Process end-of-sequence, parsing any buffered content as tool call(s).
@@ -356,7 +358,16 @@ public class ToolCallProcessor {
 
     private func firstRange(of tags: [String], in text: String) -> Range<String.Index>? {
         tags
-            .compactMap { text.range(of: $0) }
+            .compactMap { tag in
+                var searchStart = text.startIndex
+                while let range = text.range(of: tag, range: searchStart..<text.endIndex) {
+                    if hasValidStartBoundary(for: tag, at: range.lowerBound, in: text) {
+                        return range
+                    }
+                    searchStart = range.upperBound
+                }
+                return nil
+            }
             .min { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
     }
 
@@ -366,11 +377,24 @@ public class ToolCallProcessor {
         for index in text.indices {
             let suffix = String(text[index...])
             guard !suffix.isEmpty else { continue }
-            if tags.contains(where: { $0.hasPrefix(suffix) && suffix.count < $0.count }) {
+            if tags.contains(where: {
+                $0.hasPrefix(suffix) && suffix.count < $0.count
+                    && hasValidStartBoundary(for: $0, at: index, in: text)
+            }) {
                 return index..<text.endIndex
             }
         }
 
         return nil
+    }
+
+    private func hasValidStartBoundary(
+        for tag: String, at index: String.Index, in text: String
+    ) -> Bool {
+        guard tag.first?.isLetter == true else { return true }
+        if index > text.startIndex {
+            return text[text.index(before: index)].isWhitespace
+        }
+        return precedingOutputCharacter?.isWhitespace ?? true
     }
 }

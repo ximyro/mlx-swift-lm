@@ -79,6 +79,17 @@ struct Gemma4FunctionParserTests {
         #expect(call.function.arguments["path"] == .string("/tmp/file.go"))
     }
 
+    @Test("Gemma4 parser accepts hyphenated function names")
+    func testHyphenatedFunctionName() throws {
+        let parser = Gemma4FunctionParser()
+        let content = #"<|tool_call>call:get-weather{city:<|"|>Tokyo<|"|>}<tool_call|>"#
+
+        let call = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(call.function.name == "get-weather")
+        #expect(call.function.arguments["city"] == .string("Tokyo"))
+    }
+
     @Test("Gemma4 parser strips think tags before tool calls")
     func testThinkTagsStripped() throws {
         let parser = Gemma4FunctionParser()

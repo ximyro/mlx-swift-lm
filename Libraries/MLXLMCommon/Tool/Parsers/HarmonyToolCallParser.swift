@@ -32,6 +32,14 @@ public struct HarmonyToolCallParser: TaggedToolCallParser, Sendable {
         var searchStart = content.startIndex
 
         while let functionRange = content.range(of: "to=functions.", range: searchStart..<content.endIndex) {
+            if functionRange.lowerBound > content.startIndex {
+                let preceding = content.index(before: functionRange.lowerBound)
+                guard content[preceding].isWhitespace else {
+                    searchStart = functionRange.upperBound
+                    continue
+                }
+            }
+
             let nameStart = functionRange.upperBound
             var nameEnd = nameStart
             while nameEnd < content.endIndex, isFunctionNameCharacter(content[nameEnd]) {
