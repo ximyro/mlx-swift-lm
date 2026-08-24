@@ -1472,6 +1472,12 @@ public class CacheList: BaseKVCache {
         return new
     }
 
+    /// Restore composite child caches from their flattened serialized state.
+    public func restore(state: [MLXArray], metaState: [String]) throws {
+        let restored = try CacheList.fromState(state: state, metaState: metaState)
+        caches = restored.caches
+    }
+
     public override var isTrimmable: Bool {
         caches.allSatisfy { $0.isTrimmable }
     }
