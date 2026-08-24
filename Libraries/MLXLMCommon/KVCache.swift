@@ -2143,6 +2143,12 @@ public class CacheList: BaseKVCache {
         return new
     }
 
+    /// Replace child caches with their flattened serialized state.
+    public func restore(state: [MLXArray], metaState: [String]) throws {
+        let restored = try CacheList.fromState(state: state, metaState: metaState)
+        caches = restored.caches
+    }
+
     /// Recursively apply a transformation to every non-composite child cache.
     ///
     /// `CacheList` children are descended into; any other cache is passed to
