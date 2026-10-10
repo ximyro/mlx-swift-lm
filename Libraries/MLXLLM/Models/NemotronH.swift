@@ -180,7 +180,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
         if let cache {
             let end = padded.dim(1)
             let start = max(0, end - (convKernelSize - 1))
-            cache[0] = padded[0..., start ..< end, 0...]
+            cache[0] = contiguous(padded[0..., start ..< end, 0...])
         }
 
         let convOutput = conv1d(padded)
@@ -232,6 +232,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
 
         if let cache {
             cache[1] = nextState
+            cache.advance(hiddenStates.dim(1))
         }
 
         let flattenedY = y.flattened(start: 2)
@@ -527,7 +528,7 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let sharedExperts {
             y = y + sharedExperts(x)
@@ -738,15 +739,15 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         let pattern = Array(configuration.hybridOverridePattern)
-        return pattern.compactMap { char -> KVCache? in
+        return try pattern.compactMap { char -> KVCache? in
             let blockType = NemotronHBlockType(from: char)
             switch blockType {
             case .mamba:
                 return MambaCache()
             case .attention:
-                return KVCacheSimple()
+                return try makeAttentionKVCache(parameters: parameters)
             case .mlp, .moe:
                 return nil  // No cache needed for MLP/MoE layers
             }
@@ -756,7 +757,9 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = [String: MLXArray]()
 
-        for (key, value) in weights {
+        for (key, value) in filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
+        {
             var finalValue = value
 
             // Handle conv1d weight axis swap
@@ -883,12 +886,18 @@ public struct NemotronHConfiguration: Codable, Sendable {
         convKernel = try container.decode(Int.self, forKey: .convKernel)
         nGroups = try container.decode(Int.self, forKey: .nGroups)
         intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
-        moeIntermediateSize = try container.decode(Int.self, forKey: .moeIntermediateSize)
-        moeSharedExpertIntermediateSize = try container.decode(
-            Int.self, forKey: .moeSharedExpertIntermediateSize)
-        nRoutedExperts = try container.decode(Int.self, forKey: .nRoutedExperts)
+        // Dense Nemotron-H checkpoints (e.g. NVIDIA-Nemotron-3-Nano-4B) have no "E"
+        // layers in hybrid_override_pattern and ship no MoE keys at all, so these
+        // are only required when an MoE layer will actually be built.
+        moeIntermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .moeIntermediateSize) ?? 0
+        moeSharedExpertIntermediateSize =
+            try container.decodeIfPresent(
+                Int.self, forKey: .moeSharedExpertIntermediateSize) ?? 0
+        nRoutedExperts = try container.decodeIfPresent(Int.self, forKey: .nRoutedExperts) ?? 0
         nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts)
-        numExpertsPerTok = try container.decode(Int.self, forKey: .numExpertsPerTok)
+        numExpertsPerTok =
+            try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 0
         layerNormEpsilon =
             try container.decodeIfPresent(Float.self, forKey: .layerNormEpsilon) ?? 1e-5
         mlpBias = try container.decodeIfPresent(Bool.self, forKey: .mlpBias) ?? false
@@ -1000,4 +1009,10 @@ public struct NemotronHConfiguration: Codable, Sendable {
         self.timeStepLimitMin = timeStepLimitMin
         self.timeStepLimitMax = timeStepLimitMax
     }
+}
+
+// MARK: - Chat conventions
+
+extension NemotronHModel {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
 }

@@ -571,19 +571,16 @@ private enum Language {
             return out
         }
 
-        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
             let layerTypes =
                 config.layerTypes
                 ?? Array(repeating: "full_attention", count: config.numHiddenLayers)
 
-            return layerTypes.map { layerType in
-                if layerType == "sliding_attention", let slidingWindow = config.slidingWindow {
-                    return RotatingKVCache(maxSize: slidingWindow)
-                } else if let maxKVSize = parameters?.maxKVSize {
-                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
-                } else {
-                    return KVCacheSimple()
-                }
+            return try layerTypes.map { layerType in
+                try makeHybridAttentionKVCache(
+                    parameters: parameters,
+                    slidingWindow: config.slidingWindow,
+                    usesSlidingWindow: layerType == "sliding_attention")
             }
         }
     }
@@ -617,7 +614,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray?,
         pixelValues: MLXArray?,
         imageSizes: [(Int, Int)]?
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         guard var pixelValues, let imageSizes else {
             guard let inputIds else {
                 fatalError("Either inputIds or pixelValues must be provided")
@@ -657,7 +654,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         let imageFeatures = multiModalProjector(selectedFeatures, imageSizes: imageSizes)
 
         // Merge embeddings
-        return mergeInputIdsWithImageFeatures(
+        return try mergeInputIdsWithImageFeatures(
             imageTokenIndex: config.imageTokenIndex,
             imageFeatures: imageFeatures,
             inputsEmbeds: inputsEmbeds,
@@ -670,7 +667,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         imageFeatures: MLXArray,
         inputsEmbeds: MLXArray,
         inputIds: MLXArray
-    ) -> MLXArray {
+    ) throws -> MLXArray {
         let (_, numImagePatches, _) = (
             imageFeatures.dim(0),
             imageFeatures.dim(1),
@@ -685,7 +682,7 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
 
         // Validate that the number of image tokens matches the number of image patches
         guard imagePositions.count == numImagePatches else {
-            fatalError(
+            throw VLMError.processing(
                 "Image token count (\(imagePositions.count)) does not match image patches (\(numImagePatches)). Ensure the processor adds exactly numImagePatches image tokens."
             )
         }
@@ -721,7 +718,9 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         return MLX.concatenated(finalEmbeddings, axis: 1)
     }
 
-    public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
+    ) throws
         -> PrepareResult
     {
         let inputIds = input.text.tokens
@@ -737,13 +736,26 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
             imageSizes = nil
         }
 
-        let embeddings = getInputEmbeddings(
+        let embeddings = try getInputEmbeddings(
             inputIds: inputIds,
             pixelValues: pixelValues,
             imageSizes: imageSizes
         )
 
-        let logits = languageModel(inputIds, cache: cache, inputsEmbeds: embeddings)
+        var tokens = inputIds
+        if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
+        let totalPositions = embeddings.dim(1)
+        let processed = try prefill.forEachChunk(total: totalPositions) { range in
+            _ = languageModel(
+                tokens[0..., range], cache: cache,
+                inputsEmbeds: embeddings[0..., range, 0...])
+            asyncEval(cache)
+        }
+        if processed > 0 { eval(cache) }
+        let logits = languageModel(
+            tokens[0..., processed...], cache: cache,
+            inputsEmbeds: embeddings[0..., processed..., 0...])
+        prefill.progress?(totalPositions, totalPositions)
         return .logits(.init(logits: logits))
     }
 
@@ -752,6 +764,8 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let weights = filterLMHeadWeights(
+            from: weights, tiedWordEmbeddings: config.textConfig.tieWordEmbeddings)
         var newWeights: [String: MLXArray] = [:]
 
         for (key, value) in weights {
@@ -807,8 +821,8 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
         return newWeights
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 }
 
@@ -890,12 +904,12 @@ public struct Mistral3MessageGenerator: MessageGenerator {
 
     public func generate(message: Chat.Message) -> Message {
         // For Mistral3 VLM, images come before text in the content
-        [
+        var dictionary: Message = [
             "role": message.role.rawValue,
-            "content": message.images.map { _ in
-                ["type": "image"]
-            } + [["type": "text", "text": message.content]],
+            "content": contentParts(for: message, layout: .imagesThenText),
         ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
     }
 }
 
@@ -998,7 +1012,8 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) async throws -> LMInput {
         // Generate structured messages using the message generator
-        let messages = Mistral3MessageGenerator().generate(from: input)
+        let messages = Mistral3MessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
 
         if input.images.isEmpty {
             // No image - just apply chat template
@@ -1099,4 +1114,10 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
             image: .init(pixels: preprocessResult.pixels, frames: preprocessResult.frames)
         )
     }
+}
+
+// MARK: - Chat conventions
+
+extension Mistral3VLM {
+    public var toolCallFormat: ToolCallFormat? { .mistral }
 }
