@@ -4,8 +4,26 @@ Common language model code.
 
 ## Articles
 
+- <doc:model-compatibility>
 - <doc:upgrade>
 - <doc:wired-memory>
+- <doc:kv-cache-quantization>
+- <doc:generation-observability>
+
+## Reranking
+
+- ``Reranker``
+- ``RerankerContainer``
+- ``RerankRequest``
+- ``RerankDocument``
+- ``RerankResult``
+- ``RerankedDocument``
+- ``RerankResponse``
+- ``RerankDocumentsResponse``
+- ``RerankExecutionOptions``
+- ``RerankTruncationPolicy``
+- ``RerankScoreKind``
+- ``RerankerError``
 
 ## Other MLX Libraries Packages
 

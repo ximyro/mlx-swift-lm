@@ -1,5 +1,15 @@
 // Copyright © 2025 Apple Inc.
 
+import MLX
+
+private let messageContentLogger = MLXLogger(label: "MessageContent")
+
+package enum MessageContentLayout: Sendable {
+    case imagesThenVideosThenText
+    case imagesThenText
+    case textThenImages
+}
+
 public enum Chat {
     public struct Message {
         /// The role of the message sender.
@@ -7,6 +17,9 @@ public enum Chat {
 
         /// The content of the message.
         public var content: String
+
+        // Records an opening reasoning delimiter supplied by the generation prompt.
+        package var prefilledReasoningStartDelimiter: String? = nil
 
         /// Array of image data associated with the message.
         public var images: [UserInput.Image]
@@ -131,8 +144,8 @@ extension MessageGenerator {
     }
 }
 
-/// Default implementation of ``MessageGenerator`` that produces a
-/// `role` and `content`.
+/// Default implementation of ``MessageGenerator`` that produces `role` and
+/// `content`, plus `name`, `tool_call_id`, and `tool_calls` when present.
 ///
 /// ```swift
 /// [
@@ -174,5 +187,33 @@ public struct NoSystemMessageGenerator: MessageGenerator {
         messages
             .filter { $0.role != .system }
             .map { generate(message: $0) }
+    }
+}
+
+extension UserInput {
+
+    /// Returns the input unchanged if its prompt is not `.chat`. Call this method before a
+    /// message generator turns the prompt into `.messages`.
+    package func removingSpecialTokenLabels(using tokenizer: any Tokenizer) -> UserInput {
+        guard case .chat(let messages) = prompt else { return self }
+        var screened = self
+        screened.prompt = .chat(
+            messages.map { message in
+                var message = message
+                message.images = message.images.map { image in
+                    guard let label = image.label,
+                        let names = tokenizer.specialTokenNames(inImageLabel: label)
+                    else { return image }
+                    let named = names.isEmpty ? "a special token" : names.joined(separator: ", ")
+                    messageContentLogger.warning(
+                        "Leaving an image name out of the prompt, because this model's tokenizer reads it as \(named)"
+                    )
+                    var image = image
+                    image.label = nil
+                    return image
+                }
+                return message
+            })
+        return screened
     }
 }
