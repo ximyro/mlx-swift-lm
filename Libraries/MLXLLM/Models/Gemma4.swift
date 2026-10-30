@@ -104,8 +104,8 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
         return languageModel.sanitize(weights: sanitized)
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        languageModel.newCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try languageModel.newCache(parameters: parameters)
     }
 }
 
@@ -115,4 +115,14 @@ extension Gemma4Model: LoRAModel {
     public var loraLayers: [Module] {
         languageModel.loraLayers
     }
+}
+
+// MARK: - Chat conventions
+
+extension Gemma4Model {
+    public var toolCallFormat: ToolCallFormat? { .gemma4 }
+
+    /// Gemma 4 brackets its thinking in labeled channels rather than a delimiter
+    /// pair (see `ReasoningConfig.gemma4`).
+    public var reasoningConfig: ReasoningConfig? { .gemma4 }
 }
